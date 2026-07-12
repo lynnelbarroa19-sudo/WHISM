@@ -1,0 +1,630 @@
+/*
+  ═══════════════════════════════════════════════════════
+  SmartRHU — Global Dark Mode
+  Import this in your root layout: app/layout.tsx
+  Applied via: document.documentElement.classList.toggle("dark")
+  ═══════════════════════════════════════════════════════
+*/
+
+/* ── Base body ── */
+html.dark body {
+  background: #061a0d;
+  color: #e2f5e9;
+}
+/* ── ROOT-CAUSE FIX: re-activate dark tokens ──
+   `dark` is on <html>, so `.root.dark` in the module never fires.
+   Re-bind the design tokens here so every var(--text) etc. goes dark. */
+html.dark [class*="root"] {
+  --bg:       #061a0d !important;
+  --surface:  #0d2516 !important;
+  --surface2: #0f2e1a !important;
+  --border:   rgba(74,222,128,0.1) !important;
+  --text:     #e2f5e9 !important;
+  --text2:    #9abea6 !important;
+  --text3:    #9abea6 !important;
+}
+html.dark [class*="bigStatCard"][class*="consultations"] [class*="bigStatVal"] { color: #4ade80 !important; }
+html.dark [class*="bigStatCard"][class*="prescriptions"] [class*="bigStatVal"] { color: #a78bfa !important; }
+html.dark [class*="bigStatCard"][class*="labRequests"]   [class*="bigStatVal"] { color: #fb923c !important; }
+html.dark [class*="bigStatCard"] * { color: #e2f5e9 !important; }
+
+/* ════════════════════════════════════════
+   SIDEBAR
+════════════════════════════════════════ */
+html.dark [class*="sidebar"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="sidebarLogo"] {
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="logoSeal"] {
+  background: rgba(22,163,74,0.15) !important;
+  border-color: rgba(74,222,128,0.15) !important;
+}
+html.dark [class*="logoName"] {
+  color: #4ade80 !important;
+}
+html.dark [class*="logoSub"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="navSectionLabel"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="navItem"] {
+  color: #9abea6 !important;
+  background: transparent !important;
+}
+html.dark [class*="navItem"]:hover {
+  background: rgba(74,222,128,0.08) !important;
+  color: #4ade80 !important;
+}
+html.dark [class*="navItemActive"] {
+  background: #16a34a !important;
+  color: #fff !important;
+}
+html.dark [class*="navItemLogout"]:hover {
+  background: rgba(239,68,68,0.1) !important;
+}
+
+/* ════════════════════════════════════════
+   MINI CALENDAR
+════════════════════════════════════════ */
+html.dark [class*="miniCal"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="calTitle"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="calNav"] {
+  color: #9abea6 !important;
+}
+html.dark [class*="calNav"]:hover {
+  background: rgba(74,222,128,0.1) !important;
+  color: #4ade80 !important;
+}
+html.dark [class*="calDow"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="calDay"] {
+  color: #9abea6 !important;
+}
+html.dark [class*="calDay"]:hover {
+  background: rgba(22,163,74,0.1) !important;
+  color: #4ade80 !important;
+}
+html.dark [class*="calDayToday"] {
+  background: #16a34a !important;
+  color: #fff !important;
+}
+
+/* ════════════════════════════════════════
+   MAIN CONTENT AREA
+════════════════════════════════════════ */
+html.dark [class*="mainArea"] {
+  background: #061a0d !important;
+}
+html.dark [class*="content"] {
+  background: #061a0d !important;
+}
+html.dark [class*="pageTitle"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="pageEyebrow"] {
+  color: #4b6557 !important;
+}
+
+/* ── Action buttons (Send Lab Request / View Lab Results use .outline) ──
+   Keep them solid green with white text in dark mode, matching Send Prescription. */
+html.dark [class*="outline"] {
+  color: #fff !important;
+  border: none !important;
+  background: linear-gradient(180deg, #2d9e4f 0%, #0d3b1f 100%) !important;
+  box-shadow: 0 3px 10px rgba(13,59,31,0.55) !important;
+}
+html.dark [class*="outline"]:hover {
+  background: linear-gradient(180deg, #34b85a 0%, #0d3b1f 100%) !important;
+  box-shadow: 0 5px 16px rgba(13,59,31,0.7) !important;
+  transform: translateY(-1px) !important;
+}
+
+/* ════════════════════════════════════════
+   STAT CARDS & BIG STATS
+════════════════════════════════════════ */
+html.dark [class*="statCardLight"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="bigStatCard"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+
+/* Default fallback — individual cards override below */
+html.dark [class*="bigStatVal"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="bigStatLbl"] {
+  color: #b8d8c4 !important;
+  opacity: 1 !important;
+}
+
+/* ── Consultations — green ── */
+html.dark [class*="bigStatCard"][class*="consultations"] [class*="bigStatVal"] {
+  color: #4ade80 !important;
+}
+html.dark [class*="bigStatCard"][class*="consultations"] [class*="bigStatLbl"] {
+  color: #b8d8c4 !important;
+  opacity: 1 !important;
+}
+html.dark [class*="bigStatCard"][class*="consultations"] [class*="bigStatIcoWrap"] {
+  background: rgba(22,199,132,0.15) !important;
+}
+
+/* ── Prescriptions — purple ── */
+html.dark [class*="bigStatCard"][class*="prescriptions"] [class*="bigStatVal"] {
+  color: #a78bfa !important;
+}
+html.dark [class*="bigStatCard"][class*="prescriptions"] [class*="bigStatLbl"] {
+  color: #b8d8c4 !important;
+  opacity: 1 !important;
+}
+html.dark [class*="bigStatCard"][class*="prescriptions"] [class*="bigStatIcoWrap"] {
+  background: rgba(124,58,237,0.15) !important;
+}
+
+/* ── Lab Requests — orange ── */
+html.dark [class*="bigStatCard"][class*="labRequests"] [class*="bigStatVal"] {
+  color: #fb923c !important;
+}
+html.dark [class*="bigStatCard"][class*="labRequests"] [class*="bigStatLbl"] {
+  color: #b8d8c4 !important;
+  opacity: 1 !important;
+}
+html.dark [class*="bigStatCard"][class*="labRequests"] [class*="bigStatIcoWrap"] {
+  background: rgba(249,115,22,0.15) !important;
+}
+
+/* ── bigStatBtn dark overrides ── */
+html.dark [class*="bigStatCard"][class*="consultations"] [class*="bigStatBtn"] {
+  background: rgba(22,199,132,0.15) !important;
+  color: #4ade80 !important;
+}
+html.dark [class*="bigStatCard"][class*="prescriptions"] [class*="bigStatBtn"] {
+  background: rgba(124,58,237,0.15) !important;
+  color: #a78bfa !important;
+}
+html.dark [class*="bigStatCard"][class*="labRequests"] [class*="bigStatBtn"] {
+  background: rgba(249,115,22,0.15) !important;
+  color: #fb923c !important;
+}
+
+/* ════════════════════════════════════════
+   BOTTOM ROW CARDS (Disease + Medicine)
+════════════════════════════════════════ */
+html.dark [class*="card"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="cardBody"] {
+  background: #0d2516 !important;
+}
+html.dark [class*="cardSubTitle"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="diseaseName"] {
+  color: #9abea6 !important;
+}
+html.dark [class*="diseasePct"] {
+  color: #9abea6 !important;
+}
+html.dark [class*="diseaseBarWrap"] {
+  background: #0f2e1a !important;
+}
+html.dark [class*="stockName"] {
+  color: #9abea6 !important;
+}
+html.dark [class*="stockPct"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="stockBarWrap"] {
+  background: #0f2e1a !important;
+}
+html.dark [class*="legendPill"] {
+  color: #9abea6 !important;
+}
+
+/* ════════════════════════════════════════
+   PENDING PATIENTS PANEL
+════════════════════════════════════════ */
+html.dark [class*="pendingCard"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="pendingHeader"] {
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="pendingTitle"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="pendingItem"] {
+  background: rgba(22,163,74,0.08) !important;
+  border-color: rgba(74,222,128,0.15) !important;
+}
+html.dark [class*="pendingDone"] {
+  background: #0d2516 !important;
+  opacity: 0.55;
+}
+html.dark [class*="pendingName"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="pendingTime"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="addPatientBtn"] {
+  color: #4ade80 !important;
+  border-color: rgba(74,222,128,0.3) !important;
+}
+html.dark [class*="addPatientBtn"]:hover {
+  background: rgba(74,222,128,0.08) !important;
+  border-color: #4ade80 !important;
+}
+html.dark [class*="emptyState"] {
+  color: #4b6557 !important;
+}
+
+/* ════════════════════════════════════════
+   AI DICTIONARY PANEL
+════════════════════════════════════════ */
+html.dark [class*="aiCard"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="aiHeader"] {
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="aiTitle"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="chatLog"] {
+  background: transparent !important;
+}
+html.dark [class*="chatAi"] {
+  background: rgba(74,222,128,0.1) !important;
+  color: #4ade80 !important;
+}
+html.dark [class*="chatInputRow"] {
+  border-color: rgba(74,222,128,0.12) !important;
+  background: #0d2516 !important;
+}
+html.dark [class*="chatInput"] {
+  background: #0f2e1a !important;
+  border-color: rgba(74,222,128,0.15) !important;
+  color: #e2f5e9 !important;
+}
+html.dark [class*="chatInput"]::placeholder {
+  color: #4b6557 !important;
+}
+html.dark [class*="suggestions"] {
+  border-color: rgba(74,222,128,0.12) !important;
+  background: #0d2516 !important;
+}
+html.dark [class*="suggestionBtn"] {
+  background: rgba(22,163,74,0.05) !important;
+  border-color: rgba(74,222,128,0.1) !important;
+  color: #9abea6 !important;
+}
+html.dark [class*="suggestionBtn"]:hover {
+  background: rgba(74,222,128,0.1) !important;
+  color: #4ade80 !important;
+  border-color: #4ade80 !important;
+}
+
+/* ── Medicine cards in AI panel ── */
+html.dark [class*="medCard"] {
+  background: rgba(22,163,74,0.05) !important;
+  border-color: rgba(74,222,128,0.1) !important;
+}
+html.dark [class*="medName"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="medType"] {
+  background: rgba(74,222,128,0.1) !important;
+  color: #4ade80 !important;
+}
+html.dark [class*="medDetail"] {
+  color: #9abea6 !important;
+}
+html.dark [class*="medDesc"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="noMeds"] {
+  background: rgba(22,163,74,0.05) !important;
+  border-color: rgba(74,222,128,0.1) !important;
+  color: #4b6557 !important;
+}
+html.dark [class*="medicineSectionLabel"] {
+  color: #4b6557 !important;
+}
+
+/* ════════════════════════════════════════
+   MODALS
+════════════════════════════════════════ */
+html.dark [class*="modal"]:not([class*="modalBackdrop"]):not([class*="modalHeader"]):not([class*="modalFooter"]) {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="modalBody"] {
+  background: #0d2516 !important;
+}
+html.dark [class*="modalBody"] label {
+  color: #9abea6 !important;
+}
+html.dark [class*="modalInput"],
+html.dark [class*="soapTextarea"],
+html.dark [class*="modalTextarea"] {
+  background: #0f2e1a !important;
+  border-color: rgba(74,222,128,0.15) !important;
+  color: #e2f5e9 !important;
+}
+html.dark [class*="modalInput"]::placeholder,
+html.dark [class*="soapTextarea"]::placeholder {
+  color: #4b6557 !important;
+}
+html.dark [class*="modalInput"]:focus,
+html.dark [class*="soapTextarea"]:focus {
+  border-color: #16a34a !important;
+}
+html.dark [class*="readOnly"] {
+  background: rgba(22,163,74,0.1) !important;
+  color: #4ade80 !important;
+  border-color: rgba(74,222,128,0.15) !important;
+}
+html.dark [class*="modalFooter"] {
+  border-color: rgba(74,222,128,0.12) !important;
+  background: #0d2516 !important;
+}
+html.dark [class*="checkboxLabel"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="checkboxLabel"]:hover {
+  color: #4ade80 !important;
+}
+html.dark [class*="labSectionTitle"] {
+  color: #4ade80 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="soapInfoBadge"] {
+  background: rgba(22,163,74,0.1) !important;
+  color: #4ade80 !important;
+}
+html.dark [class*="soapLabel"] {
+  color: #4ade80 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="soapActions"] {
+  border-color: rgba(74,222,128,0.12) !important;
+  background: #0d2516 !important;
+}
+html.dark [class*="fastingNote"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="rxSymbol"] {
+  color: #4ade80 !important;
+}
+html.dark [class*="warnTitle"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="warnText"] {
+  color: #9abea6 !important;
+}
+
+/* ════════════════════════════════════════
+   GLOBAL FORM ELEMENTS
+════════════════════════════════════════ */
+html.dark select {
+  background-color: #0d2516 !important;
+  color: #9abea6 !important;
+  border-color: rgba(74,222,128,0.2) !important;
+}
+html.dark option {
+  background: #0d2516 !important;
+  color: #e2f5e9 !important;
+}
+html.dark input[type="text"],
+html.dark input[type="email"],
+html.dark input[type="password"],
+html.dark input[type="number"],
+html.dark input[type="date"],
+html.dark textarea {
+  background-color: #0f2e1a;
+  color: #e2f5e9;
+  border-color: rgba(74,222,128,0.15);
+}
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #4b6557;
+}
+
+/* ════════════════════════════════════════
+   MEDICINE STOCK CARD — dark overrides
+════════════════════════════════════════ */
+html.dark [class*="stockCard"] {
+  background: #0d2516 !important;
+}
+html.dark [class*="stockCardTitle"] {
+  color: #e2f5e9 !important;
+}
+
+/* ════════════════════════════════════════
+   TIMELINE PAGE (doctor/timeline)
+════════════════════════════════════════ */
+html.dark [class*="patientPanel"],
+html.dark [class*="patientPanelHeader"],
+html.dark [class*="timelinePanel"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="patientRow"] {
+  border-color: rgba(74,222,128,0.08) !important;
+}
+html.dark [class*="patientRow"]:hover {
+  background: rgba(22,163,74,0.08) !important;
+}
+html.dark [class*="patientRowActive"] {
+  background: rgba(22,163,74,0.15) !important;
+  border-color: #16a34a !important;
+}
+html.dark [class*="patientRowName"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="patientRowMeta"],
+html.dark [class*="patientCount"],
+html.dark [class*="patientPanelHeading"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="toolbar"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="viewModeTabs"] {
+  background: #0f2e1a !important;
+}
+html.dark [class*="viewModeBtn"] {
+  color: #9abea6 !important;
+}
+html.dark [class*="viewModeBtnActive"] {
+  background: #0d2516 !important;
+  color: #e2f5e9 !important;
+}
+html.dark [class*="filterSelect"] {
+  background-color: #0d2516 !important;
+  color: #9abea6 !important;
+  border-color: rgba(74,222,128,0.2) !important;
+}
+html.dark [class*="statsStrip"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="statCell"]:hover {
+  background: rgba(22,163,74,0.06) !important;
+}
+html.dark [class*="statLabel"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="patientHeader"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="patientHeaderName"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="patientHeaderChip"] {
+  background: #0f2e1a !important;
+  border-color: rgba(74,222,128,0.15) !important;
+  color: #9abea6 !important;
+}
+html.dark [class*="visitCardInner"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.12) !important;
+}
+html.dark [class*="visitCardInner"]:hover {
+  border-color: rgba(74,222,128,0.25) !important;
+}
+html.dark [class*="visitTitle"] {
+  color: #e2f5e9 !important;
+}
+html.dark [class*="visitDoctor"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="visitBody"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.08) !important;
+}
+html.dark [class*="sectionLabel"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="vitalChip"] {
+  background: #0f2e1a !important;
+  border-color: rgba(74,222,128,0.12) !important;
+  color: #9abea6 !important;
+}
+html.dark [class*="notesBox"] {
+  background: #0f2e1a !important;
+  color: #9abea6 !important;
+}
+html.dark [class*="rxPill"] {
+  background: rgba(124,58,237,0.15) !important;
+  border-color: rgba(124,58,237,0.2) !important;
+  color: #c4b5fd !important;
+}
+html.dark [class*="labCheck"] {
+  background: rgba(37,99,235,0.15) !important;
+  color: #93c5fd !important;
+}
+html.dark [class*="labItem"] {
+  color: #9abea6 !important;
+}
+html.dark [class*="followUpBox"] {
+  background: rgba(217,119,6,0.1) !important;
+  border-color: rgba(217,119,6,0.25) !important;
+}
+html.dark [class*="followUpBoxDate"] {
+  color: #fcd34d !important;
+}
+html.dark [class*="timelineHeading"],
+html.dark [class*="timelineRecordCount"] {
+  color: #4b6557 !important;
+}
+html.dark [class*="visitFilterBtn"] {
+  background: #0f2e1a !important;
+  border-color: rgba(74,222,128,0.12) !important;
+  color: #9abea6 !important;
+}
+html.dark [class*="noRecords"],
+html.dark [class*="emptyText"],
+html.dark [class*="emptyHint"] {
+  color: #9abea6 !important;
+}
+html.dark [class*="conditionBadge"] {
+  background: rgba(190,18,60,0.15) !important;
+  border-color: rgba(190,18,60,0.2) !important;
+  color: #fca5a5 !important;
+}
+html.dark [class*="allergyBadge"] {
+  background: rgba(180,83,9,0.15) !important;
+  border-color: rgba(180,83,9,0.2) !important;
+  color: #fcd34d !important;
+}
+html.dark [class*="exportBtn"] {
+  background: #0d2516 !important;
+  border-color: #16a34a !important;
+  color: #4ade80 !important;
+}
+html.dark [class*="exportDropdown"] {
+  background: #0d2516 !important;
+  border-color: rgba(74,222,128,0.15) !important;
+}
+html.dark [class*="exportFmtItem"] {
+  border-color: rgba(74,222,128,0.08) !important;
+  color: #e2f5e9 !important;
+}
+html.dark [class*="exportFmtItem"]:hover {
+  background: rgba(22,163,74,0.08) !important;
+}
+html.dark [class*="exportCatName"] {
+  color: #9abea6 !important;
+}
+html.dark [class*="badgeVisited"] {
+  background: #0f2e1a !important;
+  color: #9abea6 !important;
+}
+
+/* ── Scrollbars ── */
+html.dark *::-webkit-scrollbar-thumb {
+  background: rgba(74,222,128,0.15) !important;
+}
+html.dark *::-webkit-scrollbar-track {
+  background: transparent !important;
+}

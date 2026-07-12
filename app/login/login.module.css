@@ -1,0 +1,371 @@
+/* ═══════════════════════════════════════════
+   SMARTRHU Login Styles
+   Two-panel: left hero image, right form
+═══════════════════════════════════════════ */
+
+.page {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  font-family: "DM Sans", sans-serif;
+}
+
+/* ── Left hero panel ── */
+.hero {
+  flex: 0 0 50%;
+  position: relative;
+  overflow: hidden;
+  height: 100vh;
+}
+.heroBg {
+  position: absolute;
+  inset: 0;
+  background: url("/doctor.jpg") center/cover no-repeat;
+  filter: brightness(0.55);
+}
+.heroOverlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(13,59,31,0.75) 0%, rgba(22,163,74,0.55) 100%);
+}
+.heroContent {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  height: 100%;
+  padding: 48px 40px;
+}
+.heroWelcome {
+  font-family: "DM Sans", sans-serif;
+  font-size: 55px;
+  font-weight: 550;
+  color: rgba(255,255,255,0.9);
+  line-height: 1.1;
+  margin-bottom: 4px;
+}
+.heroTitle {
+  font-family: "Syne", sans-serif;
+  font-size: 55px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1;
+  margin-bottom: 12px;
+}
+.heroTitle span { color: #4ade80; }
+.heroSub {
+  font-size: 30px;
+  color: rgba(255,255,255,0.65);
+  letter-spacing: 0.06em;
+}
+
+/* ── Right form panel ── */
+.formPanel {
+  flex: 1;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 36px 48px 24px;
+  overflow-y: auto;
+}
+.formTop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 360px;
+}
+.logo {
+  width: 130px;
+  height: 130px;
+  border-radius: 70%;
+  object-fit: cover;
+  margin-bottom: 20px;
+}
+.logoFallback {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #0d3b1f, #16a34a);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  margin-bottom: 8px;
+}
+.logoSub {
+  font-size: 15px;
+  color: #090909;
+  margin-bottom: 35px;
+  text-align: center;
+}
+.divider {
+  width: 200%;
+  height: 1.5px;
+  background: #111212;
+  margin-bottom: 30px;
+}
+
+/* Access point */
+.accessTitle {
+  font-family: "Syne", sans-serif;
+  font-size: 20px;
+  font-weight: 700;
+  color: #0a2912;
+  margin-bottom: 10px;
+  margin-top: 15px;
+  text-align: center;
+}
+.accessSub {
+  font-size: 15px;
+  color: #4bb754;
+  margin-bottom: 40px;
+  text-align: center;
+}
+.accessBtns {
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+  width: 100%;
+}
+.accessBtn {
+  display: flex;
+  align-items: center;
+  gap: 30px;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, #0d3b1f, #16a34a);
+  border: none;
+  border-radius: 10px;
+  color: #fff;
+  cursor: pointer;
+  transition: opacity 0.18s, transform 0.18s;
+  width: 100%;
+  font-family: "DM Sans", sans-serif;
+}
+.accessBtn:hover { opacity: 0.92; transform: translateY(-1px); }
+.accessBtnIcon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.accessBtnText { flex: 1; text-align: center; }
+.accessBtnTitle {
+  font-family: "Syne", sans-serif;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  display: block;
+}
+.accessBtnDesc {
+  font-size: 15px;
+  color: rgba(250, 246, 246, 0.7);
+  display: block;
+  margin-top: 1px;
+}
+.accessBtnArrow {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Login form */
+.formInner {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.formRole {
+  font-family: "Syne", sans-serif;
+  font-size: 18px;
+  font-weight: 800;
+  color: #0d3b1f;
+  text-align: center;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+.formRoleSub {
+  font-size: 13px;
+  color: #16a34a;
+  text-align: center;
+  margin-bottom: 28px;
+}
+.fieldGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.fieldLabel {
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+}
+.fieldWrap { position: relative; }
+.fieldInput {
+  width: 100%;
+  background: #f3f4f6;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 11px 14px;
+  font-size: 14px;
+  color: #111827;
+  font-family: "DM Sans", sans-serif;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.fieldInput:focus {
+  border-color: #16a34a;
+  box-shadow: 0 0 0 3px rgba(22,163,74,0.12);
+  background: #fff;
+}
+.eyeBtn {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  padding: 4px;
+}
+.rememberRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  font-size: 12px;
+}
+.rememberLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #6b7280;
+  cursor: pointer;
+}
+.rememberLabel input { accent-color: #16a34a; }
+.forgotBtn {
+  background: none;
+  border: none;
+  color: #dc2626;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: "DM Sans", sans-serif;
+}
+.forgotBtn:hover { text-decoration: underline; }
+.signInBtn {
+  width: 100%;
+  background: linear-gradient(135deg, #0d3b1f, #16a34a);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 13px;
+  font-family: "Syne", sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: opacity 0.18s, transform 0.18s;
+  margin-bottom: 16px;
+}
+.signInBtn:hover:not(:disabled) { opacity: 0.92; transform: translateY(-1px); }
+.signInBtn:disabled { opacity: 0.6; cursor: not-allowed; }
+.backBtn {
+  background: none;
+  border: none;
+  color: #16a34a;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: "DM Sans", sans-serif;
+  margin: 0 auto;
+}
+.backBtn:hover { text-decoration: underline; }
+.errorBox {
+  background: #fee2e2;
+  color: #991b1b;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Change password form */
+.cpTitle {
+  font-family: "Syne", sans-serif;
+  font-size: 18px;
+  font-weight: 800;
+  color: #0a2912;
+  letter-spacing: 0.06em;
+  text-align: center;
+  margin-bottom: 24px;
+}
+.conditionList {
+  margin: 4px 0 20px 0;
+  padding-left: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.conditionList li {
+  font-size: 12px;
+  color: #6b7280;
+  padding-left: 14px;
+  position: relative;
+}
+.conditionList li::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  color: #374151;
+}
+.conditionList li.met { color: #16a34a; }
+.conditionList li.met::before { content: "✓"; color: #16a34a; }
+.cpBtn {
+  width: 100%;
+  background: #7f1d1d;
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 13px;
+  font-family: "Syne", sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: opacity 0.18s;
+  margin-bottom: 14px;
+}
+.cpBtn:hover:not(:disabled) { opacity: 0.88; }
+.cpBtn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Footer */
+.footer {
+  font-size: 15px;
+  color: #0a0a0a;
+  text-align: center;
+  line-height: 1.6;
+
+}
