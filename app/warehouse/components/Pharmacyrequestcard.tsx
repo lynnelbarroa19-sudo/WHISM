@@ -49,7 +49,6 @@ const TAB_CONFIG: { key: ReqTab; label: string }[] = [
   { key: 'pending',   label: 'Pending'   },
   { key: 'alerted',   label: 'Alerted'   },
   { key: 'confirmed', label: 'Confirmed' },
-  { key: 'rejected',  label: 'Rejected'  },
   { key: 'all',       label: 'All'       },
 ]
 
@@ -272,13 +271,20 @@ export default function PharmacyRequestsCard() {
 
         {/* Header */}
         <div style={{
-          padding: '16px 16px 12px',
+          padding: '18px 18px 14px',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           flexShrink: 0,
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 16, lineHeight: 1 }}>📋</span>
-            <span style={{ fontSize: 15, fontWeight: 800, color: 'var(--text)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{
+              width: 32, height: 32, borderRadius: 9,
+              background: 'var(--green-light)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 16, lineHeight: 1, flexShrink: 0,
+            }}>
+              📋
+            </div>
+            <span style={{ fontSize: 16, fontWeight: 800, color: 'var(--text)', letterSpacing: '-0.01em' }}>
               Pharmacy Requests
             </span>
           </div>
@@ -286,22 +292,23 @@ export default function PharmacyRequestsCard() {
             background: 'var(--green)', color: '#fff', fontSize: 12, fontWeight: 700,
             minWidth: 26, height: 26, borderRadius: 20,
             display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 8px',
+            flexShrink: 0,
           }}>
             {counts.all}
           </span>
         </div>
 
-        {/* Tabs */}
+        {/* Tabs — all four evenly spaced across the full width, responsive at any screen size */}
         <div style={{
-          display: 'flex', gap: 16, padding: '0 16px',
-          borderBottom: '1px solid var(--border)', flexShrink: 0, overflowX: 'auto',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          padding: '0 18px', borderBottom: '1px solid var(--border)', flexShrink: 0,
         }}>
           {TAB_CONFIG.map(t => (
             <button
               key={t.key}
               onClick={() => setReqTab(t.key)}
               style={{
-                padding: '0 0 10px', fontSize: 12, fontWeight: 700,
+                padding: '0 0 12px', fontSize: 12, fontWeight: 700,
                 border: 'none', background: 'transparent', cursor: 'pointer',
                 fontFamily: 'inherit', textAlign: 'center', whiteSpace: 'nowrap',
                 display: 'flex', alignItems: 'center', gap: 5,

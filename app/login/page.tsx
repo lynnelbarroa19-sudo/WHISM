@@ -52,12 +52,14 @@ export default function LoginPage() {
     e.preventDefault();
     setError(""); setLoading(true);
 
+    const cleanEmail = email.trim().toLowerCase();
+
     try {
       let userRecord: any = null;
 
       // 1. Try signing in directly with email
       const { error: authErr } = await supabase.auth.signInWithPassword({
-        email: email.trim(),
+        email: cleanEmail,
         password,
       });
 
@@ -65,18 +67,39 @@ export default function LoginPage() {
         // Signed in with full email
         const { data: { user: supaUser } } = await supabase.auth.getUser();
         const { data: profile, error: pe } = await supabase
-          .from("users").select("*").eq("email", supaUser?.email ?? "").single();
-        if (pe || !profile) throw new Error("User profile not found.");
+          .from("users")
+          .select("*")
+          .ilike("email", supaUser?.email ?? cleanEmail)
+          .single();
+
+        if (pe || !profile) {
+          // Log the real reason to the console — "no rows" (PGRST116) usually
+          // means either the row doesn't exist, or RLS is blocking the SELECT.
+          console.error("Profile lookup failed:", pe);
+          throw new Error(
+            pe?.code === "PGRST116"
+              ? "No matching profile found for this account. Check the users table and its RLS SELECT policy."
+              : "User profile not found."
+          );
+        }
         userRecord = profile;
       } else {
         // 2. Try matching by email prefix (in case partial email was typed)
-        const { data: list, error: qe } = await supabase.from("users").select("*");
-        if (qe) throw new Error("Database error. Check credentials.");
+        const { data: list, error: qe } = await supabase
+          .from("users")
+          .select("*")
+          .ilike("email", `${cleanEmail}%`);
+
+        if (qe) {
+          console.error("Fallback lookup failed:", qe);
+          throw new Error("Database error. Check credentials.");
+        }
+
         const found = list?.find(
-          (u: any) =>
-            u.email?.split("@")[0]?.toLowerCase() === email.toLowerCase().trim()
+          (u: any) => u.email?.split("@")[0]?.toLowerCase() === cleanEmail
         );
         if (!found) throw new Error("User not found.");
+
         const { error: a2 } = await supabase.auth.signInWithPassword({
           email: found.email,
           password,
@@ -99,7 +122,8 @@ export default function LoginPage() {
       }
 
       // 3. Role checks
-      const role = userRecord.role.toLowerCase();
+      const role = String(userRecord.role ?? "").toLowerCase();
+      if (!role) throw new Error("This account has no role assigned. Contact the administrator.");
       if (forAdmin && role !== "admin") throw new Error("Access denied. Admin only.");
       if (!forAdmin && role === "admin") throw new Error("Use the Admin login instead.");
 
@@ -192,11 +216,16 @@ export default function LoginPage() {
       if (dbErr) throw new Error(`DB update failed: ${dbErr.message}`);
 
       // 4. Verify DB update actually saved (RLS check)
-      const { data: freshProfile } = await supabase
+      const { data: freshProfile, error: verifyDbErr } = await supabase
         .from("users")
         .select("is_first_login")
         .eq("user_id", userId)
         .single();
+
+      if (verifyDbErr) {
+        console.error("Post-update verify failed:", verifyDbErr);
+        throw new Error("Could not verify DB update. Check Supabase RLS policies (UPDATE/SELECT).");
+      }
       if (freshProfile?.is_first_login === true)
         throw new Error("DB update did not save. Check Supabase RLS policies.");
 

@@ -3,7 +3,13 @@ import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import styles from './warehouse.module.css'
 
-interface ExpiringSoon { med_name: string; exp_date: string; quantity: number }
+interface ExpiringSoon {
+  id: string           // batch_id — unique key per row
+  med_name: string
+  exp_date: string
+  quantity: number
+  batch_number: string | null
+}
 
 // ── Custom watermark-style icons for the analytics cards ──
 function BoxIcon({ size = 64 }: { size?: number }) {
@@ -51,6 +57,8 @@ export default function StatsCards() {
   const [expiringSoon, setExpiringSoon] = useState<ExpiringSoon[]>([])
   const [dayFilter, setDayFilter] = useState<30 | 60 | 90>(30)
   const [loading, setLoading] = useState(true)
+  const [expiringLoading, setExpiringLoading] = useState(true)
+  const [expiringError, setExpiringError] = useState('')
   const today = new Date()
 
   useEffect(() => { fetchStats() }, [])
@@ -60,44 +68,79 @@ export default function StatsCards() {
   const fetchStats = async () => {
     setLoading(true)
 
-    const { count: total } = await supabase
-      .from('warehouse_medicines')
+    const { count: total, error: totalErr } = await supabase
+      .from('medicines')
       .select('*', { count: 'exact', head: true })
-      .eq('archived', false)
+      .eq('is_archived', false)
+    if (totalErr) console.error('Total medicine count error:', totalErr)
     setTotalMedicine(total || 0)
 
-    const { count: drugs } = await supabase
-      .from('warehouse_medicines')
+    const { count: drugs, error: drugsErr } = await supabase
+      .from('medicines')
       .select('*', { count: 'exact', head: true })
-      .eq('archived', false)
+      .eq('is_archived', false)
       .eq('category', 'drug')
+    if (drugsErr) console.error('Total drugs count error:', drugsErr)
     setTotalDrugs(drugs || 0)
 
-    const { count: supplies } = await supabase
-      .from('warehouse_medicines')
+    const { count: supplies, error: suppliesErr } = await supabase
+      .from('medicines')
       .select('*', { count: 'exact', head: true })
-      .eq('archived', false)
+      .eq('is_archived', false)
       .eq('category', 'supply')
+    if (suppliesErr) console.error('Total supplies count error:', suppliesErr)
     setTotalSupplies(supplies || 0)
 
     setLoading(false)
   }
 
+  // FIXED: expiration_date and total_quantity live on medicine_batches, not on
+  // medicines (medicines is just the catalog — generic_name, dosage, category,
+  // unit). This joins medicine_batches -> medicines to pull the generic_name,
+  // and only counts batches that are actually still active/in-stock.
   const fetchExpiring = async (days: number) => {
+    setExpiringLoading(true)
+    setExpiringError('')
+
     const startDate = new Date()
     const endDate = new Date()
-    if (days === 30) { endDate.setDate(endDate.getDate() + 30) }
-    else if (days === 60) { startDate.setDate(startDate.getDate() + 31); endDate.setDate(endDate.getDate() + 60) }
-    else { startDate.setDate(startDate.getDate() + 61); endDate.setDate(endDate.getDate() + 90) }
+    if (days === 30) {
+      endDate.setDate(endDate.getDate() + 30)
+    } else if (days === 60) {
+      startDate.setDate(startDate.getDate() + 31)
+      endDate.setDate(endDate.getDate() + 60)
+    } else {
+      startDate.setDate(startDate.getDate() + 61)
+      endDate.setDate(endDate.getDate() + 90)
+    }
 
-    const { data } = await supabase
-      .from('warehouse_medicines')
-      .select('med_name, exp_date, quantity')
-      .eq('archived', false)
-      .gte('exp_date', startDate.toISOString().split('T')[0])
-      .lte('exp_date', endDate.toISOString().split('T')[0])
-      .order('exp_date', { ascending: true })
-    setExpiringSoon(data || [])
+    const { data, error } = await supabase
+      .from('medicine_batches')
+      .select('batch_id, medicine_id, batch_number, expiration_date, total_quantity, medicines!inner(generic_name)')
+      .in('status', ['available', 'low_stock'])
+      .gt('total_quantity', 0)
+      .gte('expiration_date', startDate.toISOString().split('T')[0])
+      .lte('expiration_date', endDate.toISOString().split('T')[0])
+      .order('expiration_date', { ascending: true })
+
+    if (error) {
+      console.error('fetchExpiring error:', error)
+      setExpiringError('Could not load expiring medicines. Check your connection and try again.')
+      setExpiringSoon([])
+      setExpiringLoading(false)
+      return
+    }
+
+    setExpiringSoon(
+      (data || []).map((d: any) => ({
+        id: d.batch_id,
+        med_name: d.medicines?.generic_name || 'Unknown',
+        exp_date: d.expiration_date,
+        quantity: d.total_quantity,
+        batch_number: d.batch_number,
+      }))
+    )
+    setExpiringLoading(false)
   }
 
   const daysLeft = (expDate: string) => {
@@ -157,7 +200,14 @@ export default function StatsCards() {
 
       {/* ── Expiring Soon — nasa dating pwesto ng Total Monthly Stock ── */}
       <div className={styles.card} style={{ gridArea: 'expiring', height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
-        <div className={styles.cardHeader}>EXPIRING SOON</div>
+        <div className={styles.cardHeader}>
+          EXPIRING SOON
+          {!expiringLoading && !expiringError && expiringSoon.length > 0 && (
+            <span style={{ fontWeight: 500, fontSize: 11, marginLeft: 6, opacity: 0.85 }}>
+              ({expiringSoon.length})
+            </span>
+          )}
+        </div>
         <div className={styles.cardBody} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 14 }}>
             {([30, 60, 90] as const).map(d => (
@@ -172,17 +222,34 @@ export default function StatsCards() {
             ))}
           </div>
 
-          {loading ? (
+          {expiringLoading ? (
             <div className={styles.emptyText}>Loading...</div>
+          ) : expiringError ? (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: '20px 0', textAlign: 'center' }}>
+              <span style={{ fontSize: 12, color: '#dc2626' }}>⚠ {expiringError}</span>
+              <button
+                onClick={() => fetchExpiring(dayFilter)}
+                style={{ background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6, padding: '4px 12px', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+              >
+                Retry
+              </button>
+            </div>
           ) : expiringSoon.length > 0 ? (
             <div className={styles.expiringList} style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-              {expiringSoon.map((item, i) => {
+              {expiringSoon.map(item => {
                 const days = daysLeft(item.exp_date)
                 return (
-                  <div key={i} className={styles.expiringItem}>
+                  <div key={item.id} className={styles.expiringItem}>
                     <div className={styles.expiringItemInfo}>
-                      <span className={styles.expiringItemName}>{item.med_name}</span>
-                      <span className={styles.expiringItemDate}>{item.exp_date}</span>
+                      <span className={styles.expiringItemName}>
+                        {item.med_name}
+                        {item.batch_number && (
+                          <span style={{ fontWeight: 500, color: 'var(--text3)', fontSize: 11 }}> · Batch {item.batch_number}</span>
+                        )}
+                      </span>
+                      <span className={styles.expiringItemDate}>
+                        {item.exp_date} · {item.quantity} unit{item.quantity !== 1 ? 's' : ''}
+                      </span>
                     </div>
                     <span className={urgencyClass(days)}>{days}d</span>
                   </div>

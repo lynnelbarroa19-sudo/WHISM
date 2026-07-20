@@ -1,6 +1,7 @@
 'use client'
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, Suspense } from 'react'
 import { useTheme } from 'next-themes'
+import { useSearchParams, useRouter } from 'next/navigation'
 import Sidebar from '../components/Sidebar'
 import Topbar from '../components/Topbar'
 import StatsCards from '../components/StatsCard'
@@ -10,35 +11,57 @@ import PharmacyRequestsCard from '../components/Pharmacyrequestcard'
 import DispenseMedicineModal from '../components/DispenseMedicineModal'
 import styles from '../components/warehouse.module.css'
 
+// useSearchParams() requires a Suspense boundary in the App Router, so the
+// actual page body lives in DashboardInner and this file just wraps it.
 export default function DashboardPage() {
+  return (
+    <Suspense fallback={null}>
+      <DashboardInner />
+    </Suspense>
+  )
+}
+
+function DashboardInner() {
   const { theme } = useTheme()
+  const searchParams = useSearchParams()
+  const router = useRouter()
   const [mounted, setMounted] = useState(false)
   const [showDispenseModal, setShowDispenseModal] = useState(false)
   const [toast, setToast] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
 
-  const leftColRef = useRef<HTMLDivElement>(null)
-  const [rightColHeight, setRightColHeight] = useState<number | undefined>(undefined)
+  const topbarRef = useRef<HTMLDivElement>(null)
+  const [topbarHeight, setTopbarHeight] = useState(0)
 
   useEffect(() => setMounted(true), [])
 
+  // Auto-open the Dispense Medicine modal when navigated here via the
+  // Sidebar's "Dispense Medicine" link (/warehouse/dashboard?dispense=1),
+  // then strip the query param so refreshing/back doesn't reopen it.
+  useEffect(() => {
+    if (searchParams.get('dispense') === '1') {
+      setShowDispenseModal(true)
+      router.replace('/warehouse/dashboard')
+    }
+  }, [searchParams, router])
+
   useEffect(() => {
     const measure = () => {
-      if (leftColRef.current) {
-        setRightColHeight(leftColRef.current.offsetHeight)
+      if (topbarRef.current) {
+        setTopbarHeight(topbarRef.current.offsetHeight)
       }
     }
     measure()
 
     const ro = new ResizeObserver(measure)
-    if (leftColRef.current) ro.observe(leftColRef.current)
+    if (topbarRef.current) ro.observe(topbarRef.current)
     window.addEventListener('resize', measure)
 
     return () => {
       ro.disconnect()
       window.removeEventListener('resize', measure)
     }
-  }, [refreshKey])
+  }, [])
 
   const handleDispenseSuccess = () => {
     setShowDispenseModal(false)
@@ -51,48 +74,46 @@ export default function DashboardPage() {
     <div className={`${styles.root} ${mounted && theme === 'dark' ? styles.dark : ''}`}>
       <Sidebar />
       <div className={styles.mainArea}>
-        <Topbar />
-        <div className={styles.content}>
+        <div ref={topbarRef}>
+          <Topbar />
+        </div>
 
-          {/* Page header */}
-          <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 22 }}>
-            <div>
+        {/* Fixed-height wrapper — buong page/window hindi na nagsscroll.
+            Height nito = viewport minus Topbar, at hindi na sya sumosobra pababa. */}
+        <div
+          style={{
+            height: topbarHeight ? `calc(100vh - ${topbarHeight}px)` : '100vh',
+            overflow: 'hidden',
+            display: 'flex',
+            gap: 20,
+            alignItems: 'stretch',
+            padding: '20px',
+            boxSizing: 'border-box',
+          }}
+        >
+
+          {/* LEFT column — header + buong grid. Ito lang ang may internal scroll. */}
+          <div
+            style={{
+              flex: 1,
+              minWidth: 760,
+              height: '100%',
+              overflowY: 'auto',
+              overflowX: 'hidden',
+              paddingRight: 4,
+            }}
+          >
+
+            {/* Page header — title lang na ngayon; ang "Dispense Medicine" action
+                ay pumunta na sa Sidebar bilang permanent nav item, kaya inalis na
+                dito yung button (walang duplicate entry point). */}
+            <div style={{ marginBottom: 22 }}>
               <p className={styles.pageEyebrow} style={{ letterSpacing: '0.12em', marginBottom: 4 }}>Warehouse</p>
               <h1 className={styles.pageTitle} style={{ fontSize: 36, lineHeight: 1.1, letterSpacing: '0.01em', color: '#0d3b1f', fontWeight: 1000 }}>DASHBOARD</h1>
             </div>
-            <button
-              onClick={() => setShowDispenseModal(true)}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '11px 24px',
-                borderRadius: 22,
-                border: 'none',
-                background: 'linear-gradient(135deg, #0d3b1f, #16a34a)',
-                color: '#fff',
-                fontSize: 13,
-                fontWeight: 700,
-                fontFamily: 'inherit',
-                cursor: 'pointer',
-                boxShadow: '0 6px 18px rgba(13,59,31,.3)',
-                transition: 'all .18s ease',
-              }}
-              onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 8px 22px rgba(13,59,31,.4)' }}
-              onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 6px 18px rgba(13,59,31,.3)' }}
-            >
-              💊 Medicine Dispense
-            </button>
-          </div>
 
-          <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start', overflowX: 'auto' }}>
-
-            {/* LEFT column — buong grid (Analytics / Expiring Soon / Stock Levels / Dispensed Medicine) */}
             <div
-              ref={leftColRef}
               style={{
-                flex: 1,
-                minWidth: 760,
                 display: 'grid',
                 gridTemplateColumns: '1fr 1fr',
                 gridTemplateRows: 'auto 280px 340px',
@@ -114,20 +135,18 @@ export default function DashboardPage() {
                 <DispensedMedicineCard key={`dispensed-${refreshKey}`} />
               </div>
             </div>
+          </div>
 
-            {/* RIGHT column — sticky requests panel */}
-            <div
-              style={{
-                width: 360,
-                flexShrink: 0,
-                position: 'sticky',
-                top: 20,
-                height: rightColHeight ? `${rightColHeight}px` : 'auto',
-              }}
-            >
-              <PharmacyRequestsCard />
-            </div>
-
+          {/* RIGHT column — Pharmacy Requests, tulad ng dati. */}
+          <div
+            style={{
+              width: 360,
+              flexShrink: 0,
+              height: '100%',
+              overflow: 'hidden',
+            }}
+          >
+            <PharmacyRequestsCard />
           </div>
 
         </div>

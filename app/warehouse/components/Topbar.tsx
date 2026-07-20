@@ -114,25 +114,44 @@ export default function Topbar() {
   // ── Fetch profile from Supabase (name, role, email, avatar) ──
   const fetchProfile = async () => {
     const uid = getStoredUserId()
-    if (!uid) return
+    if (!uid) {
+      console.warn('[Topbar] fetchProfile: no uid found in localStorage (userId / smartrhu_user). Skipping fetch.')
+      return
+    }
+
     const { data, error } = await supabase
       .from('users')
       .select('username, email, avatar_url, role')
       .eq('user_id', uid)
-      .single()
-    if (error) { console.error('[Topbar] fetchProfile:', error); return }
-    if (data) {
-      setUserName(data.username || 'Name')
-      setUserEmail(data.email || '')
-      setUserRole(
-        data.role
-          ? data.role === 'admin'
-            ? 'Administrator'
-            : data.role.charAt(0).toUpperCase() + data.role.slice(1)
-          : 'Member'
-      )
-      if (data.avatar_url) setUserAvatar(`${data.avatar_url}?t=${Date.now()}`)
+      .maybeSingle() // ← was .single(); maybeSingle() returns null instead of throwing when 0 rows match
+
+    if (error) {
+      // Log actual error fields — PostgrestError doesn't always spread cleanly in the console
+      console.error('[Topbar] fetchProfile error:', {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+        uid,
+      })
+      return
     }
+
+    if (!data) {
+      console.warn('[Topbar] fetchProfile: no user row found for user_id =', uid)
+      return
+    }
+
+    setUserName(data.username || 'Name')
+    setUserEmail(data.email || '')
+    setUserRole(
+      data.role
+        ? data.role === 'admin'
+          ? 'Administrator'
+          : data.role.charAt(0).toUpperCase() + data.role.slice(1)
+        : 'Member'
+    )
+    if (data.avatar_url) setUserAvatar(`${data.avatar_url}?t=${Date.now()}`)
   }
 
   useEffect(() => {

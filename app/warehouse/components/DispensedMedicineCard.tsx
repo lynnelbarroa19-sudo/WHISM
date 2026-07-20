@@ -5,12 +5,23 @@ import styles from './warehouse.module.css'
 
 type RangeFilter = 'day' | 'month' | 'year'
 
-interface DispensedItem {
-  id: string
-  med_name: string
-  quantity_dispensed: number
-  dispensed_to: string
-  dispensed_at: string
+// One row = one batch allocation on a released dispense — joined all the way
+// up to the medicine name and down to the destination it went to. Only
+// releases with status 'released' are counted here, since that's the point
+// where stock is actually decremented (a 'pending' release hasn't been
+// dispensed yet — see DispenseMedicineModal).
+interface DispensedRow {
+  quantity: number
+  medicine_batches: {
+    medicine_id: string
+    medicines: { generic_name: string } | null
+  } | null
+  releases: {
+    date_released: string
+    status: string
+    destination_id: string
+    destinations: { destination_name: string } | null
+  } | null
 }
 
 interface GroupedItem {
@@ -39,6 +50,7 @@ const RANGE_TABS: { key: RangeFilter; label: string }[] = [
 export default function DispensedMedicineCard() {
   const [items,       setItems]       = useState<GroupedItem[]>([])
   const [loading,     setLoading]     = useState(true)
+  const [fetchError,  setFetchError]  = useState('')
   const [total,       setTotal]       = useState(0)
   const [rangeLabel,  setRangeLabel]  = useState('')
   const [range,       setRange]       = useState<RangeFilter>('month')
@@ -71,24 +83,45 @@ export default function DispensedMedicineCard() {
 
   async function fetchDispensed(r: RangeFilter) {
     setLoading(true)
+    setFetchError('')
 
     const { start, end, label } = getRangeBounds(r)
     setRangeLabel(label)
 
+    // release_items is the source of truth for "what actually left the
+    // warehouse" — each row is one batch allocation on a release. We join up
+    // to medicines (for the name) and destinations (for where it went), and
+    // filter on the parent release's status + date_released. The `!inner`
+    // join on `releases` is required so the `.eq`/`.gte`/`.lte` filters below
+    // can reach into that nested table.
     const { data, error } = await supabase
-      .from('warehouse_dispensed')
-      .select('id, med_name, quantity_dispensed, dispensed_to, dispensed_at')
-      .gte('dispensed_at', start)
-      .lte('dispensed_at', end)
+      .from('release_items')
+      .select(`
+        quantity,
+        medicine_batches (
+          medicine_id,
+          medicines ( generic_name )
+        ),
+        releases!inner (
+          date_released,
+          status,
+          destination_id,
+          destinations ( destination_name )
+        )
+      `)
+      .eq('releases.status', 'released')
+      .gte('releases.date_released', start)
+      .lte('releases.date_released', end)
 
     if (!error && data) {
       // Group by medicine name
       const grouped: Record<string, { total: number; destinations: Record<string, number> }> = {}
-      data.forEach((item: DispensedItem) => {
-        if (!grouped[item.med_name]) grouped[item.med_name] = { total: 0, destinations: {} }
-        grouped[item.med_name].total += item.quantity_dispensed
-        const dest = item.dispensed_to || 'Unknown'
-        grouped[item.med_name].destinations[dest] = (grouped[item.med_name].destinations[dest] || 0) + item.quantity_dispensed
+      ;(data as unknown as DispensedRow[]).forEach(row => {
+        const medName = row.medicine_batches?.medicines?.generic_name || 'Unknown'
+        const destName = row.releases?.destinations?.destination_name || 'Unknown'
+        if (!grouped[medName]) grouped[medName] = { total: 0, destinations: {} }
+        grouped[medName].total += row.quantity
+        grouped[medName].destinations[destName] = (grouped[medName].destinations[destName] || 0) + row.quantity
       })
 
       const result: GroupedItem[] = Object.entries(grouped)
@@ -102,6 +135,8 @@ export default function DispensedMedicineCard() {
       setItems(result)
       setTotal(result.reduce((s, i) => s + i.total, 0))
     } else {
+      console.error('fetchDispensed:', error)
+      setFetchError('Could not load dispense history.')
       setItems([])
       setTotal(0)
     }
@@ -120,33 +155,44 @@ export default function DispensedMedicineCard() {
       <div className={styles.cardBody} style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px 14px', minHeight: 0 }}>
 
         {/* Range tabs */}
-       {/* Range tabs */}
-<div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-  {RANGE_TABS.map(t => (
-    <button
-      key={t.key}
-      onClick={() => setRange(t.key)}
-      style={{
-        flex: 1,
-        padding: '7px 0',
-        fontSize: 12,
-        fontWeight: 700,
-        border: `1.5px solid ${range === t.key ? 'var(--green)' : 'var(--border)'}`,
-        borderRadius: 20,
-        background: range === t.key ? 'var(--green)' : 'transparent',
-        color: range === t.key ? '#fff' : 'var(--text2)',
-        cursor: 'pointer',
-        fontFamily: 'inherit',
-        transition: 'all .15s',
-      }}
-    >
-      {t.label}
-    </button>
-  ))}
-</div>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+          {RANGE_TABS.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setRange(t.key)}
+              style={{
+                flex: 1,
+                padding: '7px 0',
+                fontSize: 12,
+                fontWeight: 700,
+                border: `1.5px solid ${range === t.key ? 'var(--green)' : 'var(--border)'}`,
+                borderRadius: 20,
+                background: range === t.key ? 'var(--green)' : 'transparent',
+                color: range === t.key ? '#fff' : 'var(--text2)',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                transition: 'all .15s',
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
         {loading ? (
           <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text3)', fontSize: 12 }}>
             Loading dispensed records…
+          </div>
+        ) : fetchError ? (
+          <div style={{ background: '#fee2e2', color: '#dc2626', padding: '10px 12px', borderRadius: 8, fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            <span>⚠ {fetchError}</span>
+            <button
+              type="button"
+              onClick={() => fetchDispensed(range)}
+              style={{ background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+            >
+              Retry
+            </button>
           </div>
         ) : (
           <>
