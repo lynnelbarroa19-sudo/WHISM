@@ -108,14 +108,14 @@ export default function LoginPage() {
         userRecord = found;
       }
 
-      // 2.5 Account status check — block suspended / inactive users
+      // 2.5 Account status check — block inactive users
+      // NOTE: users_status_check constraint only allows 'active' | 'inactive'.
+      // Any other value (or a missing column) falls through to the generic message.
       const acctStatus = String(userRecord.status ?? "active").toLowerCase();
       if (acctStatus !== "active") {
         await supabase.auth.signOut();
         const reason =
-          acctStatus === "suspended"
-            ? "Your account has been suspended. Please contact the administrator."
-            : acctStatus === "inactive"
+          acctStatus === "inactive"
             ? "Your account is inactive. Please contact the administrator."
             : "Your account is not active. Please contact the administrator.";
         throw new Error(reason);

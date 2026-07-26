@@ -7,9 +7,9 @@
 //   1. Work out how many PIECES the request represents.
 //        box unit   → requested_boxes × pieces_per_box_snapshot (+ any loose pieces)
 //        piece unit → requested_partial_pieces (the plain qty)
-//   2. Deduct those pieces from warehouse_medicines (FEFO — earliest expiry first).
+//   2. Deduct those pieces from medicine_batches (FEFO — earliest expiry first).
 //   3. Add the same pieces to pharma_medicines (creates the row if it doesn't exist).
-//   4. Mark the restock_requests row as 'confirmed'.
+//   4. Mark the pharma_restock_requests row as 'confirmed'.
 //
 // ── THIS IS THE ONLY PLACE THAT MAY EVER ADD STOCK TO pharma_medicines AS
 // PART OF A RESTOCK CONFIRMATION. RestockConfirmListener.tsx used to ALSO
@@ -19,19 +19,53 @@
 // reintroduce a second writer for this event without removing this one
 // first. ──────────────────────────────────────────────────────────────────
 //
-// ── BOXES / STRIPS ("banig") / PIECES ──────────────────────────────────────────
-//   The schema tracks two levels: box → pieces, via `pieces_per_box`.
-//   Example: 1 box = 10 strips (banig), 1 strip = 12 pieces.
-//   Store that as   pieces_per_box = 10 × 12 = 120.
-//   Then 1 box = 120 pieces falls out of the math automatically.
-//   (To show strips in the UI later: strips = Math.floor(pieces / 12).)
+// ── TABLE / PRIMARY KEY for restock requests (this was bug #1) ─────────────
+//   The actual table is `pharma_restock_requests`, NOT `restock_requests`.
+//   Its primary key column is `restock_request_id`, NOT `id`. `req.id` is
+//   still fine as the field name on RestockRequestRow (the caller aliases
+//   restock_request_id → id when selecting) — but every Supabase call must
+//   target the real table/column names below.
+//
+// ── WAREHOUSE SCHEMA (this was bug #2) ──────────────────────────────────────
+//   There is no `warehouse_medicines` table. Warehouse stock actually lives
+//   across two tables:
+//     medicines         — one row per medicine (medicine_id, generic_name, ...)
+//     medicine_batches  — one row per batch of that medicine, with:
+//         boxes             integer
+//         strips_per_box    integer | null
+//         pieces_per_strip  integer | null
+//         loose_pieces      integer
+//         total_quantity    GENERATED ALWAYS AS
+//                              (boxes * COALESCE(strips_per_box,0) * COALESCE(pieces_per_strip,0))
+//                              + loose_pieces
+//                            STORED   ← read-only, never write to this column directly
+//   So "pieces per box" for a batch = strips_per_box × pieces_per_strip (both
+//   may be null, which the generated column treats as 0 — meaning that
+//   batch's boxes don't count toward its available pieces at all, only its
+//   loose_pieces do). This file mirrors that same rule when opening boxes.
 //
 // ── COLUMN NAME DIFFERENCE (important) ─────────────────────────────────────────
-//   warehouse_medicines uses:  pcs_per_box , partial_pcs
-//   pharma_medicines    uses:  pieces_per_box , partial_pieces
+//   medicine_batches (warehouse) uses:  boxes, strips_per_box, pieces_per_strip, loose_pieces
+//   pharma_medicines            uses:  boxes, pieces_per_box, partial_pieces
 //   This file deliberately reads/writes the correct names for each table.
+//
+// ── BOX-UNIT REQUESTS WITH NO requested_boxes (this was bug #3) ─────────────
+//   Some restock requests have unit = "box" but requested_boxes /
+//   requested_partial_pieces were never populated (legacy rows, or a form
+//   path that only ever wrote `quantity`). Previously the box branch below
+//   had NO fallback to `quantity` in that case, so totalPieces came out to
+//   0 and confirmRestockTransfer failed with "Requested quantity is zero."
+//   even though the request clearly had a real quantity on it. The piece
+//   branch already had this fallback (`reqPartial > 0 ? reqPartial :
+//   req.quantity`) — the box branch now mirrors it, and also adds
+//   requested_partial_pieces (loose pieces on top of full boxes) into the
+//   total, which was previously dropped entirely.
 
 import { supabase } from '@/lib/supabase'
+
+// Table + PK for the restock requests table — must match PharmacyRequestsCard.tsx.
+const RESTOCK_TABLE = 'pharma_restock_requests'
+const RESTOCK_PK    = 'restock_request_id'
 
 export interface RestockRequestRow {
   id: string
@@ -70,9 +104,9 @@ const IS_BOX_UNIT = (unit: string) =>
 export async function confirmRestockTransfer(req: RestockRequestRow): Promise<TransferResult> {
   // ── Guard: bail out if this request was already confirmed ─────────────
   const { data: freshRow, error: freshErr } = await supabase
-    .from('restock_requests')
+    .from(RESTOCK_TABLE)
     .select('status')
-    .eq('id', req.id)
+    .eq(RESTOCK_PK, req.id)
     .single()
 
   if (freshErr) {
@@ -92,8 +126,15 @@ export async function confirmRestockTransfer(req: RestockRequestRow): Promise<Tr
   const reqPartial = req.requested_partial_pieces ?? 0
 
   // Total pieces this request moves.
+  //
+  // Box branch: normally reqBoxes/reqPartial drive the total. But if BOTH
+  // are 0 (unit says "box" yet nothing was ever recorded in those columns —
+  // a legacy/incomplete request), fall back to `quantity` instead of
+  // silently computing 0, mirroring what the piece branch already does.
   const totalPieces = isBox
-    ? reqBoxes * piecesPerBox + reqPartial
+    ? (reqBoxes > 0 || reqPartial > 0
+        ? reqBoxes * piecesPerBox + reqPartial
+        : req.quantity)
     : (reqPartial > 0 ? reqPartial : req.quantity)
 
   if (totalPieces <= 0) {
@@ -116,36 +157,55 @@ export async function confirmRestockTransfer(req: RestockRequestRow): Promise<Tr
 
   // 4: confirm the request
   const { error } = await supabase
-    .from('restock_requests')
+    .from(RESTOCK_TABLE)
     .update({ status: 'confirmed' })
-    .eq('id', req.id)
+    .eq(RESTOCK_PK, req.id)
   if (error) return { ok: false, movedPieces: totalPieces, reason: error.message }
 
   return { ok: true, movedPieces: totalPieces }
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
- * WAREHOUSE side — deduct `piecesNeeded` pieces, FEFO (earliest expiry first).
- * Drains loose pieces (partial_pcs) first, then opens whole boxes.
- * Returns the earliest expiry it touched, so a brand-new pharmacy row can
- * inherit a sensible exp_date.
+ * WAREHOUSE side — deduct `piecesNeeded` pieces, FEFO (earliest expiry first),
+ * from medicine_batches for the given medicine.
+ *
+ * Drains loose_pieces first, then opens whole boxes (boxes × strips_per_box ×
+ * pieces_per_strip pieces each — 0 if either factor is null, matching how
+ * total_quantity itself is generated). Returns the earliest expiry it
+ * touched, so a brand-new pharmacy row can inherit a sensible exp_date.
  * ─────────────────────────────────────────────────────────────────────────── */
 async function deductFromWarehouse(
   medName: string,
   piecesNeeded: number,
 ): Promise<{ ok: boolean; reason?: string; expDate?: string }> {
+  // Look up the medicine record(s) first — medicine_batches only stores
+  // medicine_id. There can be more than one non-archived `medicines` row
+  // for the same generic_name (e.g. a legacy duplicate), so match ALL of
+  // them instead of grabbing one via limit(1) — picking the wrong single
+  // id here was causing "No warehouse stock found" even when a batch with
+  // real stock existed, just under a different medicine_id.
+  const { data: medRows, error: medErr } = await supabase
+    .from('medicines')
+    .select('medicine_id')
+    .ilike('generic_name', medName.trim())
+    .eq('is_archived', false)
+
+  if (medErr) return { ok: false, reason: medErr.message }
+  if (!medRows?.length) return { ok: false, reason: `No medicine record found for "${medName}".` }
+  const medicineIds = medRows.map(m => m.medicine_id)
+
   const { data: batches, error } = await supabase
-    .from('warehouse_medicines')
-    .select('id, quantity, boxes, pcs_per_box, partial_pcs, exp_date')
-    .eq('archived', false)
-    .ilike('med_name', medName.trim())
-    .gt('quantity', 0)
-    .order('exp_date', { ascending: true })
+    .from('medicine_batches')
+    .select('batch_id, boxes, strips_per_box, pieces_per_strip, loose_pieces, total_quantity, expiration_date, status')
+    .in('medicine_id', medicineIds)
+    .neq('status', 'archived')
+    .gt('total_quantity', 0)
+    .order('expiration_date', { ascending: true, nullsFirst: false })
 
   if (error)             return { ok: false, reason: error.message }
   if (!batches?.length)  return { ok: false, reason: `No warehouse stock found for "${medName}".` }
 
-  const totalAvailable = batches.reduce((s, b) => s + (b.quantity ?? 0), 0)
+  const totalAvailable = batches.reduce((s, b) => s + (b.total_quantity ?? 0), 0)
   if (totalAvailable < piecesNeeded) {
     return {
       ok: false,
@@ -159,33 +219,43 @@ async function deductFromWarehouse(
   for (const batch of batches) {
     if (remaining <= 0) break
 
-    const pcsPerBox  = batch.pcs_per_box ?? 1
-    let   partialPcs = batch.partial_pcs ?? 0
-    let   boxes      = batch.boxes ?? 0
-    const totalQty   = batch.quantity ?? 0
+    // Pieces per box for THIS batch — 0 if either factor is missing, same
+    // rule the generated total_quantity column itself uses.
+    const piecesPerBox = (batch.strips_per_box ?? 0) * (batch.pieces_per_strip ?? 0)
+    let   loosePieces  = batch.loose_pieces ?? 0
+    let   boxes        = batch.boxes ?? 0
+    const totalQty     = batch.total_quantity ?? 0
 
     const take = Math.min(remaining, totalQty)
     let   need = take
 
-    if (!earliestExp) earliestExp = batch.exp_date
+    if (!earliestExp) earliestExp = batch.expiration_date ?? undefined
 
     // Drain loose pieces first, then open whole boxes as needed.
-    if (partialPcs >= need) {
-      partialPcs -= need
+    if (loosePieces >= need) {
+      loosePieces -= need
     } else {
-      need -= partialPcs
-      partialPcs = 0
-      const boxesToOpen  = Math.min(Math.ceil(need / pcsPerBox), boxes)
-      const piecesOpened = boxesToOpen * pcsPerBox
-      boxes     -= boxesToOpen
-      const leftover = piecesOpened - need        // leftover from the last opened box
-      partialPcs = leftover > 0 ? leftover : 0
+      need -= loosePieces
+      loosePieces = 0
+      if (piecesPerBox > 0) {
+        const boxesToOpen  = Math.min(Math.ceil(need / piecesPerBox), boxes)
+        const piecesOpened = boxesToOpen * piecesPerBox
+        boxes -= boxesToOpen
+        const leftover = piecesOpened - need   // leftover from the last opened box
+        loosePieces = leftover > 0 ? leftover : 0
+      }
+      // If piecesPerBox is 0, this batch has no usable boxes (matches how
+      // total_quantity treats them) — `take` was already capped by totalQty
+      // above so this branch shouldn't be reachable in that case.
     }
 
+    // total_quantity is a generated/STORED column — never write to it
+    // directly; only boxes and loose_pieces are updated, and it recomputes
+    // itself.
     const { error: upErr } = await supabase
-      .from('warehouse_medicines')
-      .update({ quantity: totalQty - take, boxes, partial_pcs: partialPcs })
-      .eq('id', batch.id)
+      .from('medicine_batches')
+      .update({ boxes, loose_pieces: loosePieces })
+      .eq('batch_id', batch.batch_id)
     if (upErr) return { ok: false, reason: upErr.message }
 
     remaining -= take

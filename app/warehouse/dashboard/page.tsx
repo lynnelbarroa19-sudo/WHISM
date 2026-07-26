@@ -9,7 +9,9 @@ import StockLevelCard from '../components/StockLevelCard'
 import DispensedMedicineCard from '../components/DispensedMedicineCard'
 import PharmacyRequestsCard from '../components/Pharmacyrequestcard'
 import DispenseMedicineModal from '../components/DispenseMedicineModal'
+import MedicineMovementAnalytics from '../components/MedicineMovementAnalytics'
 import styles from '../components/warehouse.module.css'
+
 
 // useSearchParams() requires a Suspense boundary in the App Router, so the
 // actual page body lives in DashboardInner and this file just wraps it.
@@ -112,26 +114,36 @@ function DashboardInner() {
               <h1 className={styles.pageTitle} style={{ fontSize: 36, lineHeight: 1.1, letterSpacing: '0.01em', color: '#0d3b1f', fontWeight: 1000 }}>DASHBOARD</h1>
             </div>
 
+            {/* Clean 2x2 layout sa gitna: kaliwang column (Expiring Soon /
+                Medicine Movement) at kanang column (Dispensed Medicine /
+                Stock Levels) — parehong magkatapat na cards ay magkapareho
+                ng height (380px sa parehong row), kaya magkapantay
+                silang apat. Note: "movement" ay hiwalay na gridArea sa
+                "expiring" (dating dahilan ng overlap ng "(3)" badge). */}
             <div
               style={{
                 display: 'grid',
                 gridTemplateColumns: '1fr 1fr',
-                gridTemplateRows: 'auto 280px 340px',
+                gridTemplateRows: 'auto 380px 380px',
                 gridTemplateAreas: `
                   "analytics analytics"
                   "expiring  dispensed"
-                  "stock     dispensed"
+                  "movement  stock"
                 `,
                 gap: 18,
               }}
             >
               <StatsCards key={`stats-${refreshKey}`} />
 
-              <div style={{ gridArea: 'stock' }}>
+              <div style={{ gridArea: 'movement', height: '100%', overflow: 'hidden' }}>
+                <MedicineMovementAnalytics key={`movement-${refreshKey}`} />
+              </div>
+
+              <div style={{ gridArea: 'stock', height: '100%', overflow: 'hidden' }}>
                 <StockLevelCard key={`stock-${refreshKey}`} />
               </div>
 
-              <div style={{ gridArea: 'dispensed' }}>
+              <div style={{ gridArea: 'dispensed', height: '100%', overflow: 'hidden' }}>
                 <DispensedMedicineCard key={`dispensed-${refreshKey}`} />
               </div>
             </div>
