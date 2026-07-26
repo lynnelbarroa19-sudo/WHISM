@@ -8,18 +8,20 @@ type ReqStatus = 'pending' | 'alerted' | 'confirmed' | 'rejected'
 type ReqTab    = ReqStatus | 'all'
 
 interface RestockRequest {
-  id: string
+  id: string                                // aliased from restock_request_id
   pharmacist_name: string
+  medicine_id: string | null
   medicine_name: string
-  dosage: string
-  medicine_type: string
+  dosage: string | null
+  medicine_type: string | null
   quantity: number
-  unit: string
+  unit: string | null
   status: ReqStatus
   created_at: string
-  requested_boxes: number | null            // ← add
-  requested_partial_pieces: number | null   // ← add
-  pieces_per_box_snapshot: number | null    // ← add
+  requested_boxes: number
+  requested_partial_pieces: number
+  pieces_per_box_snapshot: number | null
+  reason: string | null
 }
 
 interface PendingAction {
@@ -45,11 +47,17 @@ interface PharmaMedRow {
   pieces_per_box: number | null
 }
 
+/** One medicine's aggregated requests — used by the "View All" grouped modal */
+interface MedicineGroup {
+  medicineName: string
+  items: RestockRequest[]
+  statusCounts: Record<ReqStatus, number>
+}
+
 const TAB_CONFIG: { key: ReqTab; label: string }[] = [
   { key: 'pending',   label: 'Pending'   },
   { key: 'alerted',   label: 'Alerted'   },
   { key: 'confirmed', label: 'Confirmed' },
-  { key: 'rejected',  label: 'Rejected'  },
   { key: 'all',       label: 'All'       },
 ]
 
@@ -59,6 +67,29 @@ const ACTION_COLOR: Record<ReqStatus, string> = {
   rejected:  '#dc2626',
   pending:   '#6b7280',
 }
+
+// Table + PK — matches the pharma_restock_requests DDL
+const TABLE_NAME = 'pharma_restock_requests'
+const PK_COLUMN  = 'restock_request_id'
+
+// Select list: alias restock_request_id -> id so the rest of the component
+// (and confirmRestockTransfer, which expects `id`) doesn't need to change.
+const SELECT_COLUMNS = `
+  id:${PK_COLUMN},
+  pharmacist_name,
+  medicine_id,
+  medicine_name,
+  dosage,
+  medicine_type,
+  unit,
+  quantity,
+  requested_boxes,
+  requested_partial_pieces,
+  pieces_per_box_snapshot,
+  reason,
+  status,
+  created_at
+`
 
 function statusStyle(status: ReqStatus): { bg: string; color: string; label: string } {
   switch (status) {
@@ -75,20 +106,68 @@ function formatDate(iso: string) {
   })
 }
 
+/** Builds the human-readable quantity string for a request row. */
 function resolveDisplayQty(req: RestockRequest): string {
   const isBox = (req.unit ?? '').toLowerCase().includes('box')
   if (isBox) {
-    const boxes = req.requested_boxes ?? 0
-    const ppb   = req.pieces_per_box_snapshot ?? 10
-    return `${boxes} box${boxes !== 1 ? 'es' : ''} (${boxes * ppb} pcs)`
+    const boxes   = req.requested_boxes ?? 0
+    const partial = req.requested_partial_pieces ?? 0
+
+    // Legacy / incomplete rows: unit is "box" but requested_boxes and
+    // requested_partial_pieces were never populated — only `quantity` was
+    // saved. Fall back to it instead of showing "0 boxes (0 pcs)".
+    if (boxes === 0 && partial === 0 && req.quantity > 0) {
+      return `${req.quantity} pcs`
+    }
+
+    const ppb        = req.pieces_per_box_snapshot ?? 10
+    const totalPieces = boxes * ppb + partial
+    const boxLabel    = `${boxes} box${boxes !== 1 ? 'es' : ''}`
+    const partialLabel = partial > 0 ? ` + ${partial} pcs` : ''
+    return `${boxLabel}${partialLabel} (${totalPieces} pcs)`
   }
-  return `${req.requested_partial_pieces ?? req.quantity} pcs`
+  return `${req.requested_partial_pieces || req.quantity} pcs`
 }
 
-function resolveUnitBucket(unit: string): 'box' | 'piece' {
-  const u = (unit ?? '').toLowerCase().trim()
-  if (u === 'box' || u === 'boxes') return 'box'
-  return 'piece'
+/**
+ * Groups all requests by medicine_name so the "View All" modal can show,
+ * per medicine, how many requests are pending/alerted/confirmed/rejected
+ * and the full list of individual requests underneath.
+ *
+ * Groups are sorted by pending-count (descending) first — the medicines
+ * needing the most attention float to the top — then alphabetically.
+ */
+function groupRequestsByMedicine(reqs: RestockRequest[]): MedicineGroup[] {
+  const map = new Map<string, MedicineGroup>()
+
+  for (const r of reqs) {
+    const key = r.medicine_name || 'Unknown medicine'
+    let group = map.get(key)
+    if (!group) {
+      group = {
+        medicineName: key,
+        items: [],
+        statusCounts: { pending: 0, alerted: 0, confirmed: 0, rejected: 0 },
+      }
+      map.set(key, group)
+    }
+    group.items.push(r)
+    group.statusCounts[r.status] += 1
+  }
+
+  return Array.from(map.values())
+    .map(g => ({
+      ...g,
+      items: [...g.items].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      ),
+    }))
+    .sort((a, b) => {
+      if (b.statusCounts.pending !== a.statusCounts.pending) {
+        return b.statusCounts.pending - a.statusCounts.pending
+      }
+      return a.medicineName.localeCompare(b.medicineName)
+    })
 }
 
 /**
@@ -99,7 +178,7 @@ function resolveUnitBucket(unit: string): 'box' | 'piece' {
  *   2. warehouse_medicines table (fallback)
  *   3. 10 (last resort; should rarely be needed)
  *
- * This value is stored as pieces_per_box_snapshot in restock_requests so the
+ * This value is stored as pieces_per_box_snapshot in pharma_restock_requests so the
  * pharmacist-side RestockConfirmListener can use the EXACT per-box count for
  * that medicine (e.g. COC pill = 1, standard tablet = 10, etc.) when adding
  * the stock to pharma_medicines.
@@ -141,10 +220,27 @@ export default function PharmacyRequestsCard() {
   const [loading,       setLoading]       = useState(true)
   const [toast,         setToast]         = useState('')
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
+  const [showAllView,   setShowAllView]   = useState(false)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const panelRef   = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { fetchRequests() }, [])
+  useEffect(() => {
+    fetchRequests()
+
+    // Live updates: any insert/update/delete on pharma_restock_requests
+    // refreshes the list automatically (matches the realtime pattern used
+    // elsewhere in SmartRHU).
+    const channel = supabase
+      .channel('pharma_restock_requests_changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: TABLE_NAME },
+        () => { fetchRequests() }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [])
 
   useEffect(() => {
     if (!pendingAction) return
@@ -160,15 +256,22 @@ export default function PharmacyRequestsCard() {
   async function fetchRequests() {
     setLoading(true)
     const { data, error } = await supabase
-      .from('restock_requests')
-      .select('id, pharmacist_name, medicine_name, dosage, medicine_type, quantity, unit, status, created_at, requested_boxes, requested_partial_pieces, pieces_per_box_snapshot')
+      .from(TABLE_NAME)
+      .select(SELECT_COLUMNS)
       .order('created_at', { ascending: false })
-    if (!error && data) setRequests(data as RestockRequest[])
+
+    if (error) {
+      console.error('fetchRequests error:', error)
+      showToast('✗ Failed to load requests.')
+    } else if (data) {
+      setRequests(data as unknown as RestockRequest[])
+    }
     setLoading(false)
   }
 
   const filteredReqs  = reqTab === 'all' ? requests : requests.filter(r => r.status === reqTab)
   const pendingCount  = requests.filter(r => r.status === 'pending').length
+  const medicineGroups = groupRequestsByMedicine(requests)
 
   const counts: Record<ReqTab, number> = {
     all:       requests.length,
@@ -183,39 +286,37 @@ export default function PharmacyRequestsCard() {
    *
    * Before writing status = 'confirmed', this looks up the accurate
    * pieces_per_box for the medicine and stores it as pieces_per_box_snapshot
-   * in restock_requests. The pharmacist-side RestockConfirmListener reads this
+   * in pharma_restock_requests. The pharmacist-side RestockConfirmListener reads this
    * snapshot to correctly convert requested boxes → pieces.
-   *
-   * Also writes requested_boxes and requested_partial_pieces so the listener
-   * knows how many full boxes + loose pieces were approved (relevant for
-   * box-unit medicines).
    */
   async function confirmRequest(req: RestockRequest) {
-  const result = await confirmRestockTransfer({
-    id: req.id,
-    medicine_name: req.medicine_name,
-    dosage: req.dosage,
-    medicine_type: req.medicine_type,
-    unit: req.unit,
-    quantity: req.quantity,
-    requested_boxes: req.requested_boxes,
-    requested_partial_pieces: req.requested_partial_pieces,
-    pieces_per_box_snapshot: req.pieces_per_box_snapshot,
-  })
+    const result = await confirmRestockTransfer({
+      id: req.id,
+      medicine_name: req.medicine_name,
+      dosage: req.dosage,
+      medicine_type: req.medicine_type,
+      unit: req.unit,
+      quantity: req.quantity,
+      requested_boxes: req.requested_boxes,
+      requested_partial_pieces: req.requested_partial_pieces,
+      pieces_per_box_snapshot: req.pieces_per_box_snapshot,
+    })
 
-  if (result.ok) {
-    setRequests(prev => prev.map(r => r.id === req.id ? { ...r, status: 'confirmed' } : r))
-    showToast(`✓ ${req.medicine_name} confirmed — ${result.movedPieces} pcs moved to pharmacy.`)
-  } else {
-    showToast(`✗ ${result.reason ?? 'Confirm failed.'}`)
+    if (result.ok) {
+      setRequests(prev => prev.map(r => r.id === req.id ? { ...r, status: 'confirmed' } : r))
+      showToast(`✓ ${req.medicine_name} confirmed — ${result.movedPieces} pcs moved to pharmacy.`)
+    } else {
+      showToast(`✗ ${result.reason ?? 'Confirm failed.'}`)
+    }
   }
-}
+
   async function actRequest(id: string, status: Exclude<ReqStatus, 'confirmed'>) {
     const req = requests.find(r => r.id === id)
     const { error } = await supabase
-      .from('restock_requests')
+      .from(TABLE_NAME)
       .update({ status })
-      .eq('id', id)
+      .eq(PK_COLUMN, id)
+
     if (!error) {
       setRequests(prev => prev.map(r => r.id === id ? { ...r, status } : r))
       const name = req?.medicine_name ?? ''
@@ -225,6 +326,9 @@ export default function PharmacyRequestsCard() {
         pending:  `${name} set back to pending.`,
       }
       showToast(msgs[status] ?? '')
+    } else {
+      console.error('actRequest error:', error)
+      showToast('✗ Failed to update request.')
     }
   }
 
@@ -240,7 +344,7 @@ export default function PharmacyRequestsCard() {
     status: ReqStatus,
   ) => {
     const rect       = e.currentTarget.getBoundingClientRect()
-    const displayQty = resolveDisplayQty(req.quantity, req.unit ?? '')
+    const displayQty = resolveDisplayQty(req)
     setPendingAction({
       reqId:       req.id,
       status,
@@ -272,36 +376,57 @@ export default function PharmacyRequestsCard() {
 
         {/* Header */}
         <div style={{
-          padding: '16px 16px 12px',
+          padding: '18px 18px 14px',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           flexShrink: 0,
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 16, lineHeight: 1 }}>📋</span>
-            <span style={{ fontSize: 15, fontWeight: 800, color: 'var(--text)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{
+              width: 32, height: 32, borderRadius: 9,
+              background: 'var(--green-light)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 16, lineHeight: 1, flexShrink: 0,
+            }}>
+              📋
+            </div>
+            <span style={{ fontSize: 16, fontWeight: 800, color: 'var(--text)', letterSpacing: '-0.01em' }}>
               Pharmacy Requests
             </span>
           </div>
-          <span style={{
-            background: 'var(--green)', color: '#fff', fontSize: 12, fontWeight: 700,
-            minWidth: 26, height: 26, borderRadius: 20,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 8px',
-          }}>
-            {counts.all}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={() => setShowAllView(true)}
+              style={{
+                background: 'var(--green-light)', color: 'var(--green)',
+                border: 'none', fontSize: 11, fontWeight: 700,
+                padding: '6px 12px', borderRadius: 8, cursor: 'pointer',
+                fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 5,
+              }}
+            >
+              🗂️ View All
+            </button>
+            <span style={{
+              background: 'var(--green)', color: '#fff', fontSize: 12, fontWeight: 700,
+              minWidth: 26, height: 26, borderRadius: 20,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 8px',
+              flexShrink: 0,
+            }}>
+              {counts.all}
+            </span>
+          </div>
         </div>
 
-        {/* Tabs */}
+        {/* Tabs — all four evenly spaced across the full width, responsive at any screen size */}
         <div style={{
-          display: 'flex', gap: 16, padding: '0 16px',
-          borderBottom: '1px solid var(--border)', flexShrink: 0, overflowX: 'auto',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          padding: '0 18px', borderBottom: '1px solid var(--border)', flexShrink: 0,
         }}>
           {TAB_CONFIG.map(t => (
             <button
               key={t.key}
               onClick={() => setReqTab(t.key)}
               style={{
-                padding: '0 0 10px', fontSize: 12, fontWeight: 700,
+                padding: '0 0 12px', fontSize: 12, fontWeight: 700,
                 border: 'none', background: 'transparent', cursor: 'pointer',
                 fontFamily: 'inherit', textAlign: 'center', whiteSpace: 'nowrap',
                 display: 'flex', alignItems: 'center', gap: 5,
@@ -334,7 +459,7 @@ export default function PharmacyRequestsCard() {
           ) : (
             filteredReqs.map(r => {
               const s          = statusStyle(r.status)
-              const displayQty = resolveDisplayQty(r.quantity, r.unit ?? '')
+              const displayQty = resolveDisplayQty(r)
               const initial    = (r.pharmacist_name ?? '?').trim().charAt(0).toUpperCase() || '?'
               return (
                 <div
@@ -526,6 +651,126 @@ export default function PharmacyRequestsCard() {
                 padding: '6px 0', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit',
               }}
             >Yes</button>
+          </div>
+        </div>
+      )}
+
+      {/* "View All" grouped modal — shows every request across all statuses,
+          grouped by medicine so the warehouse can see total demand per item. */}
+      {showAllView && (
+        <div
+          onClick={() => setShowAllView(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 3000,
+            background: 'rgba(0,0,0,.45)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: 24,
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: 'var(--surface, #fff)',
+              borderRadius: 16,
+              width: '100%', maxWidth: 640,
+              maxHeight: '85vh',
+              display: 'flex', flexDirection: 'column',
+              boxShadow: '0 20px 50px rgba(0,0,0,.25)',
+              overflow: 'hidden',
+            }}
+          >
+            {/* Modal header */}
+            <div style={{
+              padding: '16px 20px', borderBottom: '1px solid var(--border)',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              flexShrink: 0,
+            }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--text)' }}>
+                  All Requests — Grouped by Medicine
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 2 }}>
+                  {requests.length} request{requests.length !== 1 ? 's' : ''} across {medicineGroups.length} medicine{medicineGroups.length !== 1 ? 's' : ''}
+                </div>
+              </div>
+              <button
+                onClick={() => setShowAllView(false)}
+                style={{
+                  background: 'var(--surface2)', border: 'none', color: 'var(--text2)',
+                  width: 28, height: 28, borderRadius: 8, cursor: 'pointer',
+                  fontSize: 14, fontWeight: 700, lineHeight: 1,
+                }}
+              >✕</button>
+            </div>
+
+            {/* Grouped list */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '12px 0' }}>
+              {medicineGroups.length === 0 ? (
+                <p className={styles.emptyText} style={{ padding: '24px 16px' }}>No requests yet</p>
+              ) : (
+                medicineGroups.map(group => (
+                  <div key={group.medicineName} style={{ margin: '0 16px 16px' }}>
+                    {/* Group header */}
+                    <div style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      marginBottom: 8,
+                    }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--text)' }}>
+                        {group.medicineName}
+                      </span>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        {(['pending', 'alerted', 'confirmed', 'rejected'] as ReqStatus[])
+                          .filter(st => group.statusCounts[st] > 0)
+                          .map(st => {
+                            const s = statusStyle(st)
+                            return (
+                              <span key={st} style={{
+                                background: s.bg, color: s.color, fontSize: 10, fontWeight: 700,
+                                padding: '2px 7px', borderRadius: 20, whiteSpace: 'nowrap',
+                              }}>
+                                {group.statusCounts[st]} {st}
+                              </span>
+                            )
+                          })}
+                      </div>
+                    </div>
+
+                    {/* Requests for this medicine */}
+                    <div style={{ border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
+                      {group.items.map((r, idx) => {
+                        const s = statusStyle(r.status)
+                        return (
+                          <div
+                            key={r.id}
+                            style={{
+                              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                              padding: '9px 12px', gap: 10,
+                              borderTop: idx === 0 ? 'none' : '1px solid var(--border)',
+                              background: 'var(--surface2)',
+                            }}
+                          >
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)', display: 'block' }}>
+                                {r.pharmacist_name}
+                              </span>
+                              <span style={{ fontSize: 10, color: 'var(--text3)' }}>
+                                {resolveDisplayQty(r)} · {formatDate(r.created_at)}
+                              </span>
+                            </div>
+                            <span style={{
+                              background: s.bg, color: s.color, fontSize: 10, fontWeight: 600,
+                              padding: '3px 9px', borderRadius: 20, flexShrink: 0, whiteSpace: 'nowrap',
+                            }}>
+                              {s.label}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       )}

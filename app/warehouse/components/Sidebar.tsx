@@ -1,10 +1,11 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { LayoutDashboard, Package, Settings, LogOut } from 'lucide-react'
+import { LayoutDashboard, Package, PackageMinus, ClipboardList, Settings, LogOut } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import styles from './warehouse.module.css'
+import { useWarehouseModals } from './WarehouseModalsContext'
 
 // Fixed-date Philippine holidays (month is 0-indexed to match JS Date).
 // Lunar/movable holidays (Holy Week, Eid, Chinese New Year) are intentionally
@@ -30,6 +31,7 @@ const PH_HOLIDAYS: Record<string, string> = {
 export default function Sidebar() {
   const pathname = usePathname()
   const router = useRouter()
+  const { showAddMedicine, showDispense } = useWarehouseModals()
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [today, setToday] = useState({ day: 0, month: 0, year: 0 })
   const [viewMonth, setViewMonth] = useState(0)
@@ -64,10 +66,20 @@ export default function Sidebar() {
     router.push('/login')
   }
 
+  // Real page links (still navigate normally)
   const menuItems = [
     { name: 'Dashboard', icon: <LayoutDashboard size={16} />, href: '/warehouse/dashboard' },
     { name: 'Medicine Inventory', icon: <Package size={16} />, href: '/warehouse/medicinestock' },
+    { name: 'Releases', icon: <PackageMinus size={16} />, href: '/warehouse/releases' },
+    { name: 'Requests', icon: <ClipboardList size={16} />, href: '/warehouse/requests' },
   ]
+
+  // Only one nav item should ever look "active" at a time. Page links use
+  // pathname, which doesn't change when a modal opens on top of the current
+  // page — so while a modal is open (triggered elsewhere, e.g. from a page
+  // button), we suppress the pathname-based highlight so no stale item stays
+  // green underneath the modal.
+  const anyModalOpen = showAddMedicine || showDispense
 
   const generalItems = [
     { name: 'Settings', icon: <Settings size={16} />, href: '/warehouse/settings' },
@@ -86,7 +98,7 @@ export default function Sidebar() {
 
   return (
     <>
-     <div className={styles.sidebar} style={{ width: collapsed ? 64 : 240, transition: 'width .2s ease', overflowX: 'visible', position: 'relative' }}>
+    <div className={styles.sidebar} style={{ width: collapsed ? 64 : 240, transition: 'width .2s ease', overflowX: 'visible', position: 'relative' }}>
 
         <div
   className={styles.sidebarLogo}
@@ -141,12 +153,14 @@ export default function Sidebar() {
         <nav className={styles.sidebarNav}>
           <div className={styles.navSection}>
             {!collapsed && <span className={styles.navSectionLabel}>Menu</span>}
+
+            {/* All real pages, including Dashboard first */}
             {menuItems.map(item => (
               <Link
                 key={item.name}
                 href={item.href}
                 title={collapsed ? item.name : undefined}
-                className={`${styles.navItem} ${pathname === item.href ? styles.navItemActive : ''}`}
+                className={`${styles.navItem} ${pathname === item.href && !anyModalOpen ? styles.navItemActive : ''}`}
                 style={collapsed ? { justifyContent: 'center', padding: '9px 0' } : undefined}>
                 {item.icon}
                 {!collapsed && item.name}
@@ -161,7 +175,7 @@ export default function Sidebar() {
                 key={item.name}
                 href={item.href}
                 title={collapsed ? item.name : undefined}
-                className={`${styles.navItem} ${pathname === item.href ? styles.navItemActive : ''}`}
+                className={`${styles.navItem} ${pathname === item.href && !anyModalOpen ? styles.navItemActive : ''}`}
                 style={collapsed ? { justifyContent: 'center', padding: '9px 0' } : undefined}>
                 {item.icon}
                 {!collapsed && item.name}
