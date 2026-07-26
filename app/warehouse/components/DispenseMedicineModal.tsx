@@ -9,8 +9,10 @@ import styles from './warehouse.module.css'
 interface BatchInfo {
   batch_id: string
   batch_number: string | null
-  availableQty: number    // this batch's total_quantity (base units)
-  piecesPerBox: number
+  availableQty: number         // this batch's total_quantity (base pieces)
+  boxes: number                // whole boxes on record for this batch
+  stripsPerBox: number | null  // null/0 = this batch has no strip breakdown
+  piecesPerStrip: number | null
   expiryDate: string | null
 }
 
@@ -22,8 +24,33 @@ interface MedicineOption {
   dosage_form: string | null
   category: string | null
   unit: string | null
-  totalAvailable: number   // sum across all active batches
+  totalAvailable: number      // sum of total_quantity across all active batches (base pieces / "Loose")
+  totalBoxAvailable: number   // sum of whole boxes across all active batches
+  totalStripAvailable: number // sum of whole strips derivable from total_quantity across all active batches
   batches: BatchInfo[]     // sorted FEFO: soonest expiry first, no-expiry last
+}
+
+// Whole boxes: read directly from each batch's `boxes` field (a physical
+// record of how many full boxes are on the shelf) — never derived from
+// piece math, since boxes are counted/received as discrete units.
+//
+// Whole strips: derived from each batch's `availableQty` (total_quantity)
+// divided by that batch's `piecesPerStrip` — NOT from `boxes * stripsPerBox`.
+// Reason: `total_quantity` includes loose pieces sitting outside a full box
+// (e.g. a box was opened/broken down, or partial stock was received). Those
+// loose pieces can still be repacked/dispensed as whole strips, so they must
+// count toward strip availability even though they don't count toward a
+// whole box. Different batches of the same medicine can have different
+// piecesPerStrip, so this is always computed per-batch, never by dividing a
+// summed piece-total by one batch's ratio.
+function sumBoxAvailable(batches: BatchInfo[]): number {
+  return batches.reduce((sum, b) => sum + (b.boxes || 0), 0)
+}
+function sumStripAvailable(batches: BatchInfo[]): number {
+  return batches.reduce((sum, b) => {
+    if (!b.piecesPerStrip) return sum
+    return sum + Math.floor(b.availableQty / b.piecesPerStrip)
+  }, 0)
 }
 
 // One row per BATCH — used ONLY to render the search dropdown, so batches of
@@ -79,7 +106,11 @@ const BARANGAYS: string[] = [
   'Villa Espina', 'Villageda', 'Villahermosa', 'Villamonte', 'Villanacaob',
 ]
 
-type DispenseUnit = 'base' | 'box'
+// Three dispense granularities. 'base' = the medicine's smallest countable
+// unit (a loose tablet/piece, or a whole bottle for bottle-type meds).
+// 'strip' and 'box' are only offered when the selected medicine's batches
+// actually have that breakdown (pieces_per_strip / strips_per_box set).
+type DispenseUnit = 'base' | 'strip' | 'box'
 
 // One line of the FEFO breakdown for a row — which batch, how much, when it expires.
 interface Allocation {
@@ -98,7 +129,10 @@ interface MedicineRow {
   category: string
   totalAvailable: number
   batches: BatchInfo[]
-  boxPiecesPerBox: number   // pieces-per-box of the FIRST (soonest-expiry, or only, batch), used only for the box-mode input conversion
+  boxBaseQty: number     // pieces per box (strips_per_box × pieces_per_strip) of the FIRST batch — used only to convert an entered Box qty into pieces for FEFO
+  stripBaseQty: number   // pieces per strip of the FIRST batch — used only to convert an entered Strip qty into pieces for FEFO
+  boxAvailable: number    // actual whole boxes available (summed directly from batch fields)
+  stripAvailable: number  // actual whole strips available, derived from total pieces per batch (summed directly from batch fields)
   quantity: string
   dispenseUnit: DispenseUnit
   searchQuery: string
@@ -115,15 +149,19 @@ function blankRow(): MedicineRow {
   return {
     id: generateId(), medicine_id: '', generic_name: '', dosage_strength: '',
     dosage_form: '', unit: '', category: '', totalAvailable: 0, batches: [],
-    boxPiecesPerBox: 1,
+    boxBaseQty: 0, stripBaseQty: 0, boxAvailable: 0, stripAvailable: 0,
     quantity: '', dispenseUnit: 'base',
     searchQuery: '', showDropdown: false, notes: '',
     selectedBatchNumber: '',
   }
 }
 
-function canUseBox(row: { boxPiecesPerBox: number }): boolean {
-  return row.boxPiecesPerBox > 1
+function canUseBox(row: { boxAvailable: number }): boolean {
+  return row.boxAvailable > 0
+}
+
+function canUseStrip(row: { stripAvailable: number }): boolean {
+  return row.stripAvailable > 0
 }
 
 // Unit type has exactly two families of base unit, never combined into one
@@ -132,12 +170,14 @@ function canUseBox(row: { boxPiecesPerBox: number }): boolean {
 //     (1 Loose = 1 piece; e.g. 5 Loose = 5 tablets dispensed)
 //   - Bottle-type meds (syrups, liquids, etc.)  -> base unit is "Bottle"
 //     (1 Bottle = 1 whole bottle; not further divided into pieces)
-// "Box" is always its own separate option on top of whichever base family
-// applies (Box = boxPiecesPerBox of that medicine's base unit, e.g. 500
-// tablets/box, or 24 bottles/box). A medicine is never both Loose AND
-// Bottle at once — only one of the two applies, based on its stored unit.
-function unitTypeLabel(row: { unit: string; boxPiecesPerBox: number; dispenseUnit: DispenseUnit }): string {
+// "Strip" and "Box" are separate options layered on top of whichever base
+// family applies — Strip = pieces_per_strip of that medicine's base unit,
+// Box = strips_per_box × pieces_per_strip of that medicine's base unit.
+// A medicine is never both Loose AND Bottle at once — only one of the two
+// applies, based on its stored unit.
+function unitTypeLabel(row: { unit: string; dispenseUnit: DispenseUnit }): string {
   if (row.dispenseUnit === 'box') return 'Box'
+  if (row.dispenseUnit === 'strip') return 'Strip'
   return isBottleType(row.unit) ? 'Bottle' : 'Loose'
 }
 
@@ -173,13 +213,17 @@ function allocateFEFO(batches: BatchInfo[], neededQty: number): { allocations: A
   return { allocations, shortfall: Math.max(remaining, 0) }
 }
 
-function toBaseQty(row: { quantity: string; dispenseUnit: DispenseUnit; boxPiecesPerBox: number }): number {
+function toBaseQty(row: { quantity: string; dispenseUnit: DispenseUnit; boxBaseQty: number; stripBaseQty: number }): number {
   const n = Number(row.quantity) || 0
-  return row.dispenseUnit === 'box' ? n * row.boxPiecesPerBox : n
+  if (row.dispenseUnit === 'box') return n * row.boxBaseQty
+  if (row.dispenseUnit === 'strip') return n * row.stripBaseQty
+  return n
 }
 
-function maxForUnit(row: { totalAvailable: number; dispenseUnit: DispenseUnit; boxPiecesPerBox: number }): number {
-  return row.dispenseUnit === 'box' ? Math.floor(row.totalAvailable / row.boxPiecesPerBox) : row.totalAvailable
+function maxForUnit(row: { totalAvailable: number; dispenseUnit: DispenseUnit; boxAvailable: number; stripAvailable: number }): number {
+  if (row.dispenseUnit === 'box') return row.boxAvailable
+  if (row.dispenseUnit === 'strip') return row.stripAvailable
+  return row.totalAvailable
 }
 
 type ReceiptItem = { name: string; qty: string; unit: string }
@@ -240,7 +284,7 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
 
     const { data: batches, error: batchesError } = await supabase
       .from('medicine_batches')
-      .select('batch_id, medicine_id, batch_number, total_quantity, expiration_date, pieces_per_box')
+      .select('batch_id, medicine_id, batch_number, total_quantity, expiration_date, strips_per_box, pieces_per_strip, boxes')
       .in('status', ['available', 'low_stock'])
       .gt('total_quantity', 0)
       .order('expiration_date', { ascending: true, nullsFirst: false })
@@ -260,7 +304,9 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
         batch_id: b.batch_id,
         batch_number: b.batch_number,
         availableQty: b.total_quantity,
-        piecesPerBox: b.pieces_per_box,
+        boxes: b.boxes || 0,
+        stripsPerBox: b.strips_per_box,
+        piecesPerStrip: b.pieces_per_strip,
         expiryDate: b.expiration_date,
       })
       batchesByMed.set(b.medicine_id, arr)
@@ -287,6 +333,8 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
           category: m.category,
           unit: m.unit,
           totalAvailable: medBatches.reduce((sum, b) => sum + b.availableQty, 0),
+          totalBoxAvailable: sumBoxAvailable(medBatches),
+          totalStripAvailable: sumStripAvailable(medBatches),
           batches: medBatches,
         } as MedicineOption
       })
@@ -343,7 +391,13 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
         .map(m => {
           const matching = m.batches.filter(b => b.batch_number === batchNumber)
           if (matching.length === 0) return null
-          return { ...m, batches: matching, totalAvailable: matching.reduce((s, b) => s + b.availableQty, 0) }
+          return {
+            ...m,
+            batches: matching,
+            totalAvailable: matching.reduce((s, b) => s + b.availableQty, 0),
+            totalBoxAvailable: sumBoxAvailable(matching),
+            totalStripAvailable: sumStripAvailable(matching),
+          }
         })
         .filter((m): m is MedicineOption => m !== null)
     }
@@ -366,6 +420,16 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
   // (or batch-filtered) batch list — not just the one clicked — so FEFO
   // cascade on quantity overflow keeps working the same as before.
   const handleSelectMed = (rowId: string, med: MedicineOption) => {
+    const firstBatch = med.batches[0]
+    const stripsPerBox   = firstBatch?.stripsPerBox ?? null
+    const piecesPerStrip = firstBatch?.piecesPerStrip ?? null
+    const stripBaseQty = piecesPerStrip ?? 0
+    // Box needs BOTH strips_per_box and pieces_per_strip set; if only
+    // pieces_per_strip is set (no strip breakdown at all — e.g. a box of
+    // loose tablets), strips_per_box defaults to 1 on the batch record, so
+    // this naturally still resolves to "pieces per box".
+    const boxBaseQty = (stripsPerBox ?? 0) * (piecesPerStrip ?? 0)
+
     updateRow(rowId, {
       medicine_id: med.medicine_id,
       generic_name: med.generic_name,
@@ -375,7 +439,10 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
       category: med.category || '',
       totalAvailable: med.totalAvailable,
       batches: med.batches,
-      boxPiecesPerBox: med.batches[0]?.piecesPerBox || 1,
+      boxBaseQty,
+      stripBaseQty,
+      boxAvailable: med.totalBoxAvailable,
+      stripAvailable: med.totalStripAvailable,
       dispenseUnit: 'base',
       quantity: '',
       searchQuery: med.brand_name ? `${med.generic_name} (${med.brand_name})` : med.generic_name,
@@ -391,6 +458,7 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
       selectedBatchNumber: batchNumber,
       medicine_id: '', generic_name: '', searchQuery: '',
       totalAvailable: 0, batches: [], quantity: '',
+      boxBaseQty: 0, stripBaseQty: 0, boxAvailable: 0, stripAvailable: 0,
     })
   }
 
@@ -478,9 +546,8 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
       if (!Number.isInteger(entered) || entered <= 0) {
         return `Quantity for "${med.generic_name}" must be a whole number greater than 0 ${unitLabel}(s).`
       }
-      const baseQty = toBaseQty(med)
-      if (baseQty > med.totalAvailable) {
-        const maxAllowed = maxForUnit(med)
+      const maxAllowed = maxForUnit(med)
+      if (entered > maxAllowed) {
         const scope = med.selectedBatchNumber ? `in Batch ${med.selectedBatchNumber}` : 'across all batches'
         return `Insufficient stock for "${med.generic_name}". Only ${maxAllowed} ${unitLabel}(s) available ${scope}.`
       }
@@ -536,7 +603,7 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
     const medicineIds = Array.from(new Set(validMeds.map(m => m.medicine_id)))
     const { data: freshBatches, error: freshError } = await supabase
       .from('medicine_batches')
-      .select('batch_id, medicine_id, batch_number, pieces_per_box, total_quantity, status, expiration_date')
+      .select('batch_id, medicine_id, batch_number, strips_per_box, pieces_per_strip, total_quantity, status, expiration_date')
       .in('medicine_id', medicineIds)
       .in('status', ['available', 'low_stock'])
       .gt('total_quantity', 0)
@@ -550,7 +617,7 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
     const freshByMed = new Map<string, BatchInfo[]>()
     for (const b of freshBatches) {
       const arr = freshByMed.get(b.medicine_id) || []
-      arr.push({ batch_id: b.batch_id, batch_number: b.batch_number, availableQty: b.total_quantity, piecesPerBox: b.pieces_per_box, expiryDate: b.expiration_date })
+      arr.push({ batch_id: b.batch_id, batch_number: b.batch_number, availableQty: b.total_quantity, boxes: 0, stripsPerBox: b.strips_per_box, piecesPerStrip: b.pieces_per_strip, expiryDate: b.expiration_date })
       freshByMed.set(b.medicine_id, arr)
     }
     for (const arr of freshByMed.values()) {
@@ -879,8 +946,9 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
 
           {medicines.map((med, index) => {
             const medCanUseBox = med.medicine_id ? canUseBox(med) : false
+            const medCanUseStrip = med.medicine_id ? canUseStrip(med) : false
             const maxQty = maxForUnit(med)
-            const exceeds = med.quantity && med.totalAvailable > 0 && toBaseQty(med) > med.totalAvailable
+            const exceeds = med.quantity !== '' && Number(med.quantity) > maxQty
             const preview = rowPreviews.get(med.id)
             const showBreakdown = preview && preview.allocations.length > 1 && preview.shortfall === 0
 
@@ -933,7 +1001,9 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                 <label htmlFor={`med-search-${med.id}`}>
                   Medicine Name * {med.totalAvailable > 0 && (
                     <span style={{ color: 'var(--green)', fontWeight: 600, fontSize: 11 }}>
-                      ({med.totalAvailable} {baseUnitLabel(med.unit)} available{med.selectedBatchNumber ? ` in Batch ${med.selectedBatchNumber}` : ` across ${med.batches.length} batch${med.batches.length !== 1 ? 'es' : ''}`}{medCanUseBox ? ` · ${Math.floor(med.totalAvailable / med.boxPiecesPerBox)} Box` : ''})
+                      ({med.totalAvailable} {baseUnitLabel(med.unit)} available{med.selectedBatchNumber ? ` in Batch ${med.selectedBatchNumber}` : ` across ${med.batches.length} batch${med.batches.length !== 1 ? 'es' : ''}`}
+                      {medCanUseStrip ? ` · ${med.stripAvailable} Strip` : ''}
+                      {medCanUseBox ? ` · ${med.boxAvailable} Box` : ''})
                     </span>
                   )}
                 </label>
@@ -942,7 +1012,7 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                   type="text"
                   className={styles.modalInput}
                   value={med.searchQuery}
-                  onChange={e => updateRow(med.id, { searchQuery: e.target.value, medicine_id: '', showDropdown: true, totalAvailable: 0, unit: '', category: '', batches: [] })}
+                  onChange={e => updateRow(med.id, { searchQuery: e.target.value, medicine_id: '', showDropdown: true, totalAvailable: 0, unit: '', category: '', batches: [], boxBaseQty: 0, stripBaseQty: 0, boxAvailable: 0, stripAvailable: 0 })}
                   onFocus={() => updateRow(med.id, { showDropdown: true })}
                   onBlur={() => setTimeout(() => updateRow(med.id, { showDropdown: false }), 150)}
                   placeholder={med.selectedBatchNumber ? `Search within Batch ${med.selectedBatchNumber}...` : 'Click or type to search...'}
@@ -957,7 +1027,15 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                           {med.selectedBatchNumber ? `No medicines found in Batch ${med.selectedBatchNumber}.` : 'No medicines match your search.'}
                         </div>
                       ) : (
-                        rows.map(row => (
+                        rows.map(row => {
+                          // Strips derived from this batch's total_quantity ÷
+                          // piecesPerStrip — includes any loose pieces sitting
+                          // outside a full box, not just boxes * stripsPerBox.
+                          const rowStrips = row.batch.piecesPerStrip
+                            ? Math.floor(row.batch.availableQty / row.batch.piecesPerStrip)
+                            : 0
+                          const rowBoxes = row.batch.boxes
+                          return (
                           <button
                             key={row.key}
                             type="button"
@@ -982,14 +1060,20 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                               <div style={{ fontSize: 12, fontWeight: 700, color: row.batch.availableQty <= 20 ? '#ef4444' : 'var(--green)' }}>
                                 {row.batch.availableQty} {baseUnitLabel(row.medicine.unit || '')}
                               </div>
-                              {row.batch.piecesPerBox > 1 && (
+                              {rowStrips > 0 && (
                                 <div style={{ fontSize: 9, color: 'var(--text3)' }}>
-                                  {Math.floor(row.batch.availableQty / row.batch.piecesPerBox)} Box
+                                  {rowStrips} Strip
+                                </div>
+                              )}
+                              {rowBoxes > 0 && (
+                                <div style={{ fontSize: 9, color: 'var(--text3)' }}>
+                                  {rowBoxes} Box
                                 </div>
                               )}
                             </div>
                           </button>
-                        ))
+                          )
+                        })
                       )}
                     </div>
                   )
@@ -1010,12 +1094,12 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
               <div style={{ marginBottom: 8 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 8 }}>
                   <label htmlFor={`med-qty-${med.id}`} style={{ margin: 0 }}>Quantity *</label>
-                  {medCanUseBox ? (
+                  {(medCanUseBox || medCanUseStrip) ? (
                     <div style={{ display: 'flex', gap: 4 }}>
-                      {/* Unit type is now a proper set of distinct, separate
-                          options — Box vs. the medicine's actual base unit
-                          (Piece, Bottle, Vial, etc.) — never smashed together
-                          into one combined label like "Loose Box". */}
+                      {/* Unit type: the medicine's actual base unit (Loose/
+                          Bottle) plus Strip and/or Box, whichever the
+                          selected medicine's batches actually support —
+                          never smashed together into one combined label. */}
                       <select
                         id={`med-unit-${med.id}`}
                         value={med.dispenseUnit}
@@ -1023,7 +1107,8 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                         style={{ fontSize: 11, fontWeight: 700, border: '1px solid var(--border)', borderRadius: 6, padding: '3px 6px', fontFamily: 'inherit', background: 'var(--surface)', color: 'var(--text2)' }}
                       >
                         <option value="base">{unitTypeLabel({ ...med, dispenseUnit: 'base' })}</option>
-                        <option value="box">Box</option>
+                        {medCanUseStrip && <option value="strip">Strip</option>}
+                        {medCanUseBox && <option value="box">Box</option>}
                       </select>
                     </div>
                   ) : med.medicine_id ? (

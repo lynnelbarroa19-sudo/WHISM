@@ -8,7 +8,7 @@ import * as XLSX from 'xlsx'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { supabase } from '@/lib/supabase'
-import { Plus, Download, X, PackageSearch, Layers, AlertTriangle, XCircle, Clock3, Archive as ArchiveIcon, RotateCcw } from 'lucide-react'
+import { Plus, Download, X, PackageSearch, Archive as ArchiveIcon, RotateCcw } from 'lucide-react'
 import {
   T,
   computeStatus, IconDrug, IconSupply, IconArchive, IconImport, IconSearch,
@@ -19,14 +19,23 @@ import {
 // ─── Row shown in the table = one medicine_batches row + its parent medicines
 // identity fields flattened together. `batch_id` is now the true unique key
 // for a row (a medicine can have several batches), so selection/keys use it
-// instead of `medicine_id`. ───────────────────────────────────────────────
-type MedicineRow = Medicine & { batch_id: string }
+// instead of `medicine_id`. `strips_per_box` / `pieces_per_strip` are carried
+// along too — used only to derive the Strip (Qty) column below. ───────────
+type MedicineRow = Medicine & {
+  batch_id: string
+  strips_per_box: number | null
+  pieces_per_strip: number | null
+}
 
 // ─── Source filter type ────────────────────────────────────────────────────
 type SourceFilter = 'all' | 'DOH' | 'PHILHEALTH' | 'LGU'
 
-// ─── Archive reason (required before a batch can be manually archived) ────
-type ArchiveReason = 'expired' | 'spoiled' | 'other'
+// ─── Archive reason (required before a batch can be MANUALLY archived).
+// NOTE: 'expired' is intentionally NOT an option here anymore — expired
+// batches are auto-archived by the system (see fetchMedicines below) and
+// never need a human to pick a reason for them. Only Spoiled/Damaged and
+// Other go through this manual confirmation modal. ─────────────────────────
+type ArchiveReason = 'spoiled' | 'other'
 
 // ─── Source color tokens — shared by the filter pills and the table badges ─
 const SOURCE_COLORS = {
@@ -66,33 +75,6 @@ function FilterBtn({ label, active, onClick, icon, activeColor, activeBg }: {
   )
 }
 
-function StatCard({ icon, label, value, color, bg, dk }: {
-  icon: React.ReactNode; label: string; value: number; color: string; bg: string; dk: boolean
-}) {
-  return (
-    <div style={{
-      flex: '1 1 160px', minWidth: 160,
-      background: dk ? T.surfDk : T.surface,
-      border: `1px solid ${dk ? T.borderDk : T.border}`,
-      borderLeft: `4px solid ${color}`,
-      borderRadius: T.radiusSm,
-      padding: '12px 16px',
-      display: 'flex', alignItems: 'center', gap: 12,
-    }}>
-      <div style={{
-        width: 34, height: 34, borderRadius: 10, flexShrink: 0,
-        background: bg, color, display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>
-        {icon}
-      </div>
-      <div>
-        <div style={{ fontSize: 20, fontWeight: 900, color: dk ? T.textDk : T.text, lineHeight: 1.1 }}>{value}</div>
-        <div style={{ fontSize: 11, fontWeight: 700, color: dk ? T.text2Dk : T.text2 }}>{label}</div>
-      </div>
-    </div>
-  )
-}
-
 function StatusBadge({ type }: { type: 'instock' | 'lowstock' | 'outofstock' | 'expired' }) {
   const map = {
     instock:    { bg: T.greenLight,  color: T.greenDark, border: `${T.green}33`,  label: 'In Stock'     },
@@ -117,6 +99,16 @@ function normalizeSource(raw: string | null | undefined): 'DOH' | 'PHILHEALTH' |
   if (src.includes('PHIL')) return 'PHILHEALTH' // matches "PHILHEALTH", "PhilHealth", etc.
   if (src === 'LGU') return 'LGU'
   return 'OTHER'
+}
+
+// Strip (Qty) for a row — derived from total_quantity ÷ pieces_per_strip,
+// NOT from boxes × strips_per_box. This way loose pieces sitting outside a
+// full box (partial stock, a broken-down box, etc.) still count toward
+// strip availability as long as there are enough of them to form a whole
+// strip. Returns 0 when the batch has no strip breakdown at all.
+function stripQtyForRow(m: MedicineRow): number {
+  if (!m.pieces_per_strip) return 0
+  return Math.floor(m.total_quantity / m.pieces_per_strip)
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -150,11 +142,13 @@ export default function MedicineStockPage() {
   const exportRef = useRef<HTMLDivElement>(null)
 
   // Archive confirmation modal — a batch cannot go straight from active
-  // status to 'archived' without the user picking a reason (Expired /
-  // Spoiled-Damaged / Other) and, for "Other", typing a note. That reason
-  // gets written into medicine_batches.remarks before the status flips.
+  // status to 'archived' without the user picking a reason (Spoiled/Damaged
+  // or Other) and, for "Other", typing a note. That reason gets written
+  // into medicine_batches.remarks before the status flips.
+  // Expired batches SKIP this modal entirely — they're auto-archived by
+  // fetchMedicines() the moment their EXP date passes.
   const [archiveTarget, setArchiveTarget] = useState<MedicineRow | null>(null)
-  const [archiveReason, setArchiveReason] = useState<ArchiveReason>('expired')
+  const [archiveReason, setArchiveReason] = useState<ArchiveReason>('spoiled')
   const [archiveNotes,  setArchiveNotes]  = useState('')
 
   const [importPreview, setImportPreview] = useState<ImportRow[] | null>(null)
@@ -190,17 +184,19 @@ export default function MedicineStockPage() {
       expiration_date: r.expiration_date,
       boxes: r.boxes,
       pieces_per_box: r.pieces_per_box,
+      strips_per_box: r.strips_per_box,
+      pieces_per_strip: r.pieces_per_strip,
       loose_pieces: r.loose_pieces,
       total_quantity: r.total_quantity,
       storage_location: r.storage_location,
-      status: r.status, // batch stock status (available/low_stock/out_of_stock/expired/archived)
+      status: r.status, // batch stock status (available/low_stock/out_of_stock/archived)
       date_received: r.date_received,
       batch_remarks: r.remarks,
       selected: false,
     } as MedicineRow
   }
 
-  // ── Fetch (joined with batches) + auto-mark expired batches ────────────────
+  // ── Fetch (joined with batches) + AUTO-ARCHIVE expired batches ─────────────
   const fetchMedicines = useCallback(async () => {
     setLoading(true)
 
@@ -219,23 +215,25 @@ export default function MedicineStockPage() {
     const rows = data || []
     const today = new Date(); today.setHours(0, 0, 0, 0)
 
-    // A batch is due for auto-expire if it's past its EXP date and not
-    // already flagged expired/archived. We update `medicine_batches.status`
-    // ONLY — `medicines.status` has its own separate check constraint
-    // (active/inactive/discontinued) and must never receive 'expired'.
-    // NOTE: this auto-flip is a passive status flag for display purposes —
-    // it is NOT the same as manually archiving a batch, so it doesn't need
-    // a reason. The reason prompt below only fires when the user actively
-    // clicks "Archive" on a row.
+    // A batch is due for auto-archive if it's past its EXP date and isn't
+    // archived yet. Unlike Spoiled/Damaged or Other, an expired batch
+    // doesn't need a human to confirm a reason — the system archives it
+    // straight away and stamps the remarks so it's clear WHY it landed in
+    // the Archived tab. We update `medicine_batches.status` ONLY —
+    // `medicines.status` has its own separate check constraint
+    // (active/inactive/discontinued) and must never receive this value.
     const expiredBatches = rows.filter((r: any) =>
-      r.status !== 'expired' && r.status !== 'archived' &&
+      r.status !== 'archived' &&
       r.expiration_date && new Date(r.expiration_date) < today
     )
 
     if (expiredBatches.length > 0) {
       await Promise.all(
         expiredBatches.map((r: any) =>
-          supabase.from('medicine_batches').update({ status: 'expired' }).eq('batch_id', r.batch_id)
+          supabase.from('medicine_batches').update({
+            status: 'archived',
+            remarks: r.remarks && r.remarks.trim() ? r.remarks : 'Expired: Auto-archived by system',
+          }).eq('batch_id', r.batch_id)
         )
       )
       const { data: fresh } = await supabase
@@ -244,7 +242,7 @@ export default function MedicineStockPage() {
         .order('created_at', { ascending: false })
       const freshFlat = ((fresh || []) as any[]).map(flattenBatchRow).filter(Boolean) as MedicineRow[]
       setMedicines(freshFlat)
-      showToastMsg(`${expiredBatches.length} expired batch(es) marked as expired.`)
+      showToastMsg(`${expiredBatches.length} expired batch(es) auto-archived.`)
     } else {
       const flat = (rows as any[]).map(flattenBatchRow).filter(Boolean) as MedicineRow[]
       setMedicines(flat)
@@ -271,14 +269,17 @@ export default function MedicineStockPage() {
   // batch is past its EXP date, OR this batch was explicitly archived.
   const isArchivedEffective = (m: MedicineRow) => m.is_archived || isExpired(m) || m.status === 'archived'
 
-  // ── Row actions: archiving a batch out of the active table now goes
-  // through a confirmation modal that requires a reason first, and restoring
-  // an archived (but not expired) batch back to its computed live status ──
+  // ── Row actions: MANUALLY archiving a batch (Spoiled/Damaged or Other)
+  // goes through a confirmation modal that requires a reason first.
+  // Expired batches never reach this — they're auto-archived on fetch, so
+  // the "Archive" button in the active tabs only ever applies to batches
+  // that are still within their EXP date. Restoring an archived (but not
+  // expired) batch brings it back to its computed live status. ──────────
 
-  // Step 1: open the modal, pre-selecting a sensible default reason.
+  // Step 1: open the modal, defaulting to "Spoiled / Damaged".
   const openArchiveModal = (m: MedicineRow) => {
     setArchiveTarget(m)
-    setArchiveReason(isExpired(m) ? 'expired' : 'spoiled')
+    setArchiveReason('spoiled')
     setArchiveNotes('')
   }
 
@@ -287,9 +288,7 @@ export default function MedicineStockPage() {
   const handleArchiveBatch = async () => {
     if (!archiveTarget) return
     const m = archiveTarget
-    const reasonLabel =
-      archiveReason === 'expired' ? 'Expired' :
-      archiveReason === 'spoiled' ? 'Spoiled/Damaged' : 'Other'
+    const reasonLabel = archiveReason === 'spoiled' ? 'Spoiled/Damaged' : 'Other'
     const notes = archiveNotes.trim()
     const combinedRemarks = notes ? `${reasonLabel}: ${notes}` : reasonLabel
 
@@ -357,22 +356,6 @@ export default function MedicineStockPage() {
   const supplyCount   = medicines.filter(m => !isArchivedEffective(m) && m.category === 'supply').length
   const archivedCount = medicines.filter(m => isArchivedEffective(m)).length
 
-  // Inventory-health stats for the current tab (Drugs / Supplies) — ignored on Archived
-  const healthStats = useMemo(() => {
-    const today = new Date(); today.setHours(0, 0, 0, 0)
-    const soon = new Date(today); soon.setDate(soon.getDate() + 30)
-    let lowStock = 0, outOfStock = 0, expiringSoon = 0
-    tabFiltered.forEach(m => {
-      if (m.status === 'low_stock') lowStock++
-      if (m.status === 'out_of_stock') outOfStock++
-      if (m.expiration_date) {
-        const exp = new Date(m.expiration_date)
-        if (exp >= today && exp <= soon) expiringSoon++
-      }
-    })
-    return { total: tabFiltered.length, lowStock, outOfStock, expiringSoon }
-  }, [tabFiltered])
-
   // Source counts — computed from tabFiltered so they reflect the CURRENT tab (Drugs/Supplies/Archived)
   const sourceCounts = useMemo(() => {
     const counts = { all: tabFiltered.length, DOH: 0, PHILHEALTH: 0, LGU: 0 }
@@ -389,16 +372,17 @@ export default function MedicineStockPage() {
     const data = selectedCount > 0 ? sortedMedicines.filter(m => m.selected) : sortedMedicines
     return data.map((m, i) => ({
       'No.': i + 1,
+      'Batch No.': m.batch_number || '',
       'Generic Name': m.generic_name,
       'Brand Name': m.brand_name || '',
       [activeTab === 'supply' ? 'Specification' : 'Dosage']: m.dosage_strength || '',
       'Type': m.dosage_form || '',
       'Manufacturer': m.manufacturer || '',
       'Source': m.source || '',
-      'Batch No.': m.batch_number || '',
       'EXP Date': m.expiration_date || '',
       'Date Received': m.date_received || '',
       'Stock Quantity': m.total_quantity,
+      'Strip (Qty)': stripQtyForRow(m),
       'Unit': m.unit || '',
       'Storage': m.storage_location || '',
       'Status': m.status,
@@ -571,10 +555,10 @@ export default function MedicineStockPage() {
   const dosageLabel  = isSupplyTab ? 'Specification' : 'Dosage'
 
   // Total column count for the table (used by colSpan on loading/empty rows):
-  // No, Name, Dosage, Type, Batch, Manufacturer, Source, Unit, EXP, Status,
-  // Storage, Date Received, Boxes, Pieces, Actions = 15, + checkbox column
-  // when the tab isn't Archived.
-  const columnCount = activeTab !== 'archived' ? 16 : 15
+  // No, Batch, Name, Dosage, Type, Manufacturer, Source, Unit, EXP, Status,
+  // Storage, Date Received, Boxes, Strip (Qty), Pieces, Actions = 16,
+  // + checkbox column when the tab isn't Archived.
+  const columnCount = activeTab !== 'archived' ? 17 : 16
 
   const thStyle: React.CSSProperties = {
     padding: '12px 12px', textAlign: 'left', fontWeight: 800,
@@ -691,36 +675,6 @@ export default function MedicineStockPage() {
               </div>
             )}
           </div>
-
-          {/* ── Inventory health summary ── */}
-          {activeTab !== 'archived' && (
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-              <StatCard
-                icon={<Layers size={17} />}
-                label={isSupplyTab ? 'Total Supplies' : 'Total Drugs'}
-                value={healthStats.total}
-                color={T.green} bg={T.greenLight} dk={dk}
-              />
-              <StatCard
-                icon={<AlertTriangle size={17} />}
-                label="Low Stock"
-                value={healthStats.lowStock}
-                color={T.amber} bg={T.amberLight} dk={dk}
-              />
-              <StatCard
-                icon={<XCircle size={17} />}
-                label="Out of Stock"
-                value={healthStats.outOfStock}
-                color={T.red} bg={T.redLight} dk={dk}
-              />
-              <StatCard
-                icon={<Clock3 size={17} />}
-                label="Expiring in 30 Days"
-                value={healthStats.expiringSoon}
-                color="#d97706" bg="#fef3c7" dk={dk}
-              />
-            </div>
-          )}
 
           {/* ── Filter bar ── */}
           <div style={{
@@ -865,10 +819,10 @@ export default function MedicineStockPage() {
                   <tr style={{ background: bg, borderBottom: `2px solid ${bdr}` }}>
                     {activeTab !== 'archived' && <th style={{ ...thStyle, width: 50 }}></th>}
                     <th style={thStyle}>No.</th>
+                    <th style={thStyle}>Batch No.</th>
                     <th style={thStyle}>Medicine Name</th>
                     <th style={thStyle}>{dosageLabel}</th>
                     <th style={thStyle}>Type</th>
-                    <th style={thStyle}>Batch No.</th>
                     <th style={thStyle}>Manufacturer</th>
                     <th style={thStyle}>Source</th>
                     <th style={thStyle}>Unit</th>
@@ -879,6 +833,10 @@ export default function MedicineStockPage() {
                     <th style={{ ...thStyle, textAlign: 'right', borderLeft: `2px dashed ${T.green}22`, minWidth: 90 }}>
                       <div style={{ fontSize: 8, color: T.text3, fontWeight: 700, letterSpacing: 0.4, marginBottom: 2 }}>WAREHOUSE</div>
                       Boxes
+                    </th>
+                    <th style={{ ...thStyle, textAlign: 'right', minWidth: 90 }}>
+                      <div style={{ fontSize: 8, color: '#a855f7', fontWeight: 700, letterSpacing: 0.4, marginBottom: 2 }}>PACK</div>
+                      Strip (Qty)
                     </th>
                     <th style={{ ...thStyle, textAlign: 'right', minWidth: 100 }}>
                       <div style={{ fontSize: 8, color: '#3b82f6', fontWeight: 700, letterSpacing: 0.4, marginBottom: 2 }}>DISPENSE</div>
@@ -927,6 +885,7 @@ export default function MedicineStockPage() {
                       : med.status === 'low_stock' ? 'lowstock'
                       : 'instock'
                     const busy = actionBusyId === med.batch_id
+                    const stripQty = stripQtyForRow(med)
 
                     return (
                       <tr key={med.batch_id}
@@ -944,6 +903,7 @@ export default function MedicineStockPage() {
                           </td>
                         )}
                         <td style={{ padding: '11px 12px', color: txt2, fontWeight: 700 }}>{i + 1}</td>
+                        <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.batch_number || '—'}</td>
                         <td style={{ padding: '11px 12px' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
                             <span style={{ color: txt2, flexShrink: 0 }}>
@@ -957,7 +917,6 @@ export default function MedicineStockPage() {
                         </td>
                         <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.dosage_strength || '—'}</td>
                         <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.dosage_form || '—'}</td>
-                        <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.batch_number || '—'}</td>
                         <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.manufacturer || '—'}</td>
                         <td style={{ padding: '11px 12px', fontSize: 11 }}>
                           {med.source ? (
@@ -995,6 +954,20 @@ export default function MedicineStockPage() {
                           <div style={{ fontSize: 10, color: T.text3 }}>{med.boxes > 0 ? 'boxes' : ''}</div>
                         </td>
 
+                        {/* Strip (Qty) — derived from total_quantity ÷ pieces_per_strip,
+                            so loose pieces outside a full box still count toward strip
+                            availability as long as they're enough to form a whole strip. */}
+                        <td style={{ padding: '11px 12px', textAlign: 'right' }}>
+                          {med.pieces_per_strip ? (
+                            <>
+                              <div style={{ fontWeight: 900, fontSize: 14, color: txt }}>{stripQty}</div>
+                              <div style={{ fontSize: 10, color: T.text3 }}>strips</div>
+                            </>
+                          ) : (
+                            <span style={{ color: T.text3 }}>—</span>
+                          )}
+                        </td>
+
                         {/* Pieces — total dispensable qty (generated column, source of truth) */}
                         <td style={{ padding: '11px 12px', textAlign: 'right' }}>
                           <div style={{ fontWeight: 900, fontSize: 15, color: med.total_quantity === 0 ? T.red : T.green }}>
@@ -1007,7 +980,8 @@ export default function MedicineStockPage() {
                           )}
                         </td>
 
-                        {/* Row actions — archive out of active stock (via reason modal), or restore from Archived */}
+                        {/* Row actions — archive out of active stock (via reason modal, Spoiled/Other
+                            only — expired batches never reach this tab), or restore from Archived */}
                         <td style={{ padding: '11px 12px', textAlign: 'center' }}>
                           {activeTab === 'archived' ? (
                             <button
@@ -1076,7 +1050,9 @@ export default function MedicineStockPage() {
             dk={dk}
           />
 
-          {/* ── Archive Confirmation Modal — reason required before archiving ── */}
+          {/* ── Archive Confirmation Modal — reason required before archiving.
+               Only Spoiled/Damaged and Other reach this modal; expired
+               batches are auto-archived by the system in fetchMedicines(). ── */}
           {archiveTarget && (
             <div style={{
               position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
@@ -1115,7 +1091,6 @@ export default function MedicineStockPage() {
                     </div>
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       {([
-                        { key: 'expired' as const, label: 'Expired' },
                         { key: 'spoiled' as const, label: 'Spoiled / Damaged' },
                         { key: 'other'   as const, label: 'Other' },
                       ]).map(({ key, label }) => {
@@ -1140,8 +1115,7 @@ export default function MedicineStockPage() {
                       value={archiveNotes}
                       onChange={e => setArchiveNotes(e.target.value)}
                       placeholder={
-                        archiveReason === 'expired' ? 'e.g. Past EXP date, unused stock left'
-                        : archiveReason === 'spoiled' ? 'e.g. Water damage, broken packaging, discoloration'
+                        archiveReason === 'spoiled' ? 'e.g. Water damage, broken packaging, discoloration'
                         : 'Describe the reason for archiving...'
                       }
                       rows={3}

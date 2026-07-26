@@ -11,6 +11,8 @@ interface ExpiringSoon {
   batch_number: string | null
 }
 
+type Source = 'LGU' | 'PhilHealth' | 'DOH'
+
 // ── Custom watermark-style icons for the analytics cards ──
 function BoxIcon({ size = 64 }: { size?: number }) {
   return (
@@ -50,10 +52,34 @@ function KitIcon({ size = 64 }: { size?: number }) {
   )
 }
 
+// Simple government-building watermark — used for the LGU card.
+function BuildingIcon({ size = 64 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M32 6 L56 20 H8 Z" fill="rgba(255,255,255,0.3)" stroke="rgba(255,255,255,0.55)" strokeWidth="2" strokeLinejoin="round"/>
+      <rect x="10" y="20" width="44" height="4" fill="rgba(255,255,255,0.4)"/>
+      <rect x="14" y="26" width="6" height="24" fill="rgba(255,255,255,0.2)" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5"/>
+      <rect x="26" y="26" width="6" height="24" fill="rgba(255,255,255,0.2)" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5"/>
+      <rect x="38" y="26" width="6" height="24" fill="rgba(255,255,255,0.2)" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5"/>
+      <rect x="8" y="50" width="48" height="6" rx="1" fill="rgba(255,255,255,0.35)" stroke="rgba(255,255,255,0.55)" strokeWidth="1.5"/>
+    </svg>
+  )
+}
+
+// Simple shield watermark — used for the DOH card.
+function ShieldIcon({ size = 64 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M32 6 L54 14 V30 C54 44 44 54 32 58 C20 54 10 44 10 30 V14 Z"
+        fill="rgba(255,255,255,0.16)" stroke="rgba(255,255,255,0.55)" strokeWidth="2" strokeLinejoin="round"/>
+      <path d="M22 32 L29 39 L43 24" stroke="rgba(255,255,255,0.7)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+    </svg>
+  )
+}
+
 export default function StatsCards() {
   const [totalMedicine, setTotalMedicine] = useState(0)
-  const [totalDrugs, setTotalDrugs] = useState(0)
-  const [totalSupplies, setTotalSupplies] = useState(0)
+  const [sourceCounts, setSourceCounts] = useState<Record<Source, number>>({ LGU: 0, PhilHealth: 0, DOH: 0 })
   const [expiringSoon, setExpiringSoon] = useState<ExpiringSoon[]>([])
   const [dayFilter, setDayFilter] = useState<30 | 60 | 90>(30)
   const [loading, setLoading] = useState(true)
@@ -65,6 +91,25 @@ export default function StatsCards() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { fetchExpiring(dayFilter) }, [dayFilter])
 
+  // Counts distinct medicines (catalog entries) that currently have at
+  // least one non-archived batch sourced from `source`. This lives on
+  // medicine_batches.source, not on medicines, so we pull the rows and
+  // dedupe by medicine_id in JS rather than relying on a head-count.
+  const countMedicinesBySource = async (source: Source) => {
+    const { data, error } = await supabase
+      .from('medicine_batches')
+      .select('medicine_id, medicines!inner(is_archived)')
+      .eq('source', source)
+      .eq('medicines.is_archived', false)
+      .neq('status', 'archived')
+
+    if (error) {
+      console.error(`Count by source (${source}) error:`, error)
+      return 0
+    }
+    return new Set((data || []).map((row: any) => row.medicine_id)).size
+  }
+
   const fetchStats = async () => {
     setLoading(true)
 
@@ -75,21 +120,12 @@ export default function StatsCards() {
     if (totalErr) console.error('Total medicine count error:', totalErr)
     setTotalMedicine(total || 0)
 
-    const { count: drugs, error: drugsErr } = await supabase
-      .from('medicines')
-      .select('*', { count: 'exact', head: true })
-      .eq('is_archived', false)
-      .eq('category', 'drug')
-    if (drugsErr) console.error('Total drugs count error:', drugsErr)
-    setTotalDrugs(drugs || 0)
-
-    const { count: supplies, error: suppliesErr } = await supabase
-      .from('medicines')
-      .select('*', { count: 'exact', head: true })
-      .eq('is_archived', false)
-      .eq('category', 'supply')
-    if (suppliesErr) console.error('Total supplies count error:', suppliesErr)
-    setTotalSupplies(supplies || 0)
+    const [lgu, philhealth, doh] = await Promise.all([
+      countMedicinesBySource('LGU'),
+      countMedicinesBySource('PhilHealth'),
+      countMedicinesBySource('DOH'),
+    ])
+    setSourceCounts({ LGU: lgu, PhilHealth: philhealth, DOH: doh })
 
     setLoading(false)
   }
@@ -158,14 +194,14 @@ export default function StatsCards() {
 
   return (
     <>
-      {/* ── Analytics — buong width ── */}
+      {/* ── Analytics — buong width, apat na card na ngayon ── */}
       <div className={styles.analyticsCard} style={{ gridArea: 'analytics' }}>
         <div className={styles.analyticsLabel}>Analytics</div>
 
-        <div className={styles.analyticsGrid}>
+        <div className={styles.analyticsGrid} style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
           <div className={styles.statCardGreen} style={{ position: 'relative', overflow: 'hidden' }}>
             <div style={{ position: 'relative', zIndex: 1 }}>
-              <div className={styles.statLabel}>Total Medicine</div>
+              <div className={styles.statLabel}>Total Medicine (All)</div>
               <div className={styles.statNum}>{loading ? '—' : totalMedicine}</div>
               <div className={styles.statDate}>{dateLabel}</div>
             </div>
@@ -176,8 +212,19 @@ export default function StatsCards() {
 
           <div className={styles.statCardGreen} style={{ position: 'relative', overflow: 'hidden' }}>
             <div style={{ position: 'relative', zIndex: 1 }}>
-              <div className={styles.statLabel}>Total Drug Medicine</div>
-              <div className={styles.statNum}>{loading ? '—' : totalDrugs}</div>
+              <div className={styles.statLabel}> LGU</div>
+              <div className={styles.statNum}>{loading ? '—' : sourceCounts.LGU}</div>
+              <div className={styles.statDate}>{dateLabel}</div>
+            </div>
+            <div style={{ position: 'absolute', right: 12, bottom: 12, opacity: 0.9 }}>
+              <BuildingIcon size={44} />
+            </div>
+          </div>
+
+          <div className={styles.statCardGreen} style={{ position: 'relative', overflow: 'hidden' }}>
+            <div style={{ position: 'relative', zIndex: 1 }}>
+              <div className={styles.statLabel}>PhilHealth</div>
+              <div className={styles.statNum}>{loading ? '—' : sourceCounts.PhilHealth}</div>
               <div className={styles.statDate}>{dateLabel}</div>
             </div>
             <div style={{ position: 'absolute', right: 12, bottom: 12, opacity: 0.9 }}>
@@ -187,12 +234,12 @@ export default function StatsCards() {
 
           <div className={styles.statCardGreen} style={{ position: 'relative', overflow: 'hidden' }}>
             <div style={{ position: 'relative', zIndex: 1 }}>
-              <div className={styles.statLabel}>Total Medicine Supplies</div>
-              <div className={styles.statNum}>{loading ? '—' : totalSupplies}</div>
+              <div className={styles.statLabel}>Department of Health</div>
+              <div className={styles.statNum}>{loading ? '—' : sourceCounts.DOH}</div>
               <div className={styles.statDate}>{dateLabel}</div>
             </div>
             <div style={{ position: 'absolute', right: 12, bottom: 12, opacity: 0.9 }}>
-              <KitIcon size={44} />
+              <ShieldIcon size={44} />
             </div>
           </div>
         </div>

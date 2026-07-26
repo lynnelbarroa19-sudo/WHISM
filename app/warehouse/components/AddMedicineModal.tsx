@@ -26,7 +26,7 @@ const blankForm = {
   genericName: '', brandName: '', dosageStrength: '', dosageForm: '',
   unit: '', manufacturer: '', source: '' as '' | 'DOH' | 'PhilHealth' | 'LGU', batchNumber: '',
   manufactureDate: '', expDate: '',
-  boxes: '', pcsPerBox: '', loosePieces: '',
+  boxes: '', stripsPerBox: '', piecesPerStrip: '',
   storageLocation: '', dateReceived: new Date().toISOString().split('T')[0], remarks: '',
   category: '' as '' | 'drug' | 'supply',
 }
@@ -141,10 +141,37 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
 
     setIsSaving(true)
 
-    const boxes        = Math.max(0, Number(form.boxes) || 0)
-    const pcsPerBox     = Math.max(1, Number(form.pcsPerBox) || 1)   // CHECK: pieces_per_box > 0
-    const loosePieces   = Math.max(0, Number(form.loosePieces) || 0)
-    const totalQty      = boxes * pcsPerBox + loosePieces   // for computeStatus only — DB computes its own total_quantity
+    const boxes = Math.max(0, Number(form.boxes) || 0)
+
+    // strips_per_box / pieces_per_strip are nullable in the DB — not every
+    // item ships in strips (e.g. bottles, masks). Blank input -> null,
+    // not 0, so the CHECK constraints (which allow NULL) and the
+    // total_quantity formula (COALESCE(..., 0)) treat it the same way.
+    const stripsPerBox   = form.stripsPerBox.trim()   === '' ? null : Math.max(0, Number(form.stripsPerBox) || 0)
+    const piecesPerStrip = form.piecesPerStrip.trim() === '' ? null : Math.max(1, Number(form.piecesPerStrip) || 1)
+
+    // total_quantity = boxes × strips_per_box × pieces_per_strip (the DB's
+    // GENERATED column only accounts for full boxes — there's no loose-stock
+    // tracking in this schema). If Boxes is entered but pieces_per_strip is
+    // left blank, that entire quantity silently multiplies by 0 in the DB
+    // and never counts toward stock — block the save instead of letting it
+    // disappear silently.
+    if (boxes > 0 && piecesPerStrip === null) {
+      showToast('Error: "Pcs / Strip" is required when Boxes is entered — it converts boxes into countable pieces. If this item isn\'t packaged in strips, just enter the pieces-per-box count here and leave "Strips / Box" blank (it defaults to 1).')
+      setIsSaving(false)
+      return
+    }
+
+    // If pieces_per_strip is set but strips_per_box was left blank, treat the
+    // whole box as "1 strip" so boxes still convert correctly — this covers
+    // items that aren't actually divided into strips (e.g. a box of 100 loose
+    // tablets, entered as strips_per_box blank + pieces_per_strip = 100).
+    const effectiveStripsPerBox = stripsPerBox === null && piecesPerStrip !== null ? 1 : stripsPerBox
+
+    // Mirrors the DB's generated total_quantity column, for computeStatus only —
+    // the DB computes and stores its own value, this is never sent on insert.
+    const totalQty = boxes * (effectiveStripsPerBox ?? 0) * (piecesPerStrip ?? 0)
+
     const todayStrNow   = new Date().toISOString().split('T')[0]
     const safeExpDate      = form.expDate && form.expDate >= todayStrNow ? form.expDate : todayStrNow
     const safeDateReceived = form.dateReceived && form.dateReceived >= todayStrNow ? form.dateReceived : todayStrNow
@@ -204,8 +231,8 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
       batch_number: form.batchNumber || null,
       expiration_date: form.expDate || null,
       boxes,
-      pieces_per_box: pcsPerBox,
-      loose_pieces: loosePieces,
+      strips_per_box: effectiveStripsPerBox,
+      pieces_per_strip: piecesPerStrip,
       // total_quantity is GENERATED ALWAYS — do NOT send it
       storage_location: form.storageLocation || null,
       status: computeStatus(totalQty, form.expDate || null),
@@ -475,12 +502,16 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
             </div>
           </div>
 
-          {/* Boxes / Pcs per box / Loose pieces — negative numbers blocked */}
+          {/* Boxes / Strips per box / Pcs per strip — negative numbers blocked.
+              Strips/Box and Pcs/Strip are optional: leave both blank for
+              items that don't ship in strips (bottles, masks, etc). This is
+              the only stock breakdown the DB supports — there's no
+              loose-strip / loose-piece tracking outside of full boxes. */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
             {[
               { label: 'Boxes', key: 'boxes', placeholder: 'e.g. 12' },
-              { label: 'Pcs / Box', key: 'pcsPerBox', placeholder: 'e.g. 100' },
-              { label: 'Loose Pieces', key: 'loosePieces', placeholder: 'e.g. 5' },
+              { label: 'Strips / Box', key: 'stripsPerBox', placeholder: 'optional — leave blank if 1' },
+              { label: 'Pcs / Strip', key: 'piecesPerStrip', placeholder: 'e.g. 10 (or pcs/box if no strips)' },
             ].map(({ label, key, placeholder }) => (
               <div key={key}>
                 <label style={{ fontSize: 11, fontWeight: 800, color: txt2, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 5 }}>{label}</label>

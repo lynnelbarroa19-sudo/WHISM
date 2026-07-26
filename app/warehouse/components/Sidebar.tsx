@@ -1,6 +1,6 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { LayoutDashboard, PackagePlus, Pill, Package, PackageMinus, ClipboardList, Settings, LogOut } from 'lucide-react'
+import { LayoutDashboard, Package, PackageMinus, ClipboardList, Settings, LogOut } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
@@ -31,7 +31,7 @@ const PH_HOLIDAYS: Record<string, string> = {
 export default function Sidebar() {
   const pathname = usePathname()
   const router = useRouter()
-  const { openAddMedicine, openDispense, showAddMedicine, showDispense } = useWarehouseModals()
+  const { showAddMedicine, showDispense } = useWarehouseModals()
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [today, setToday] = useState({ day: 0, month: 0, year: 0 })
   const [viewMonth, setViewMonth] = useState(0)
@@ -74,19 +74,11 @@ export default function Sidebar() {
     { name: 'Requests', icon: <ClipboardList size={16} />, href: '/warehouse/requests' },
   ]
 
-  // Modal-triggering "actions" — rendered right after Dashboard, but these are
-  // buttons (not links). Clicking them opens the modal on top of whatever
-  // page you're currently on, via WarehouseModalsContext — no navigation to
-  // Medicine Inventory or anywhere else happens.
-  const actionItems = [
-    { name: 'Add Medicine', icon: <PackagePlus size={16} />, onClick: openAddMedicine, active: showAddMedicine },
-    { name: 'Dispense Medicine', icon: <Pill size={16} />, onClick: openDispense, active: showDispense },
-  ]
-
   // Only one nav item should ever look "active" at a time. Page links use
   // pathname, which doesn't change when a modal opens on top of the current
-  // page — so while a modal is open, we suppress the pathname-based highlight
-  // and let the modal's own button be the only green one.
+  // page — so while a modal is open (triggered elsewhere, e.g. from a page
+  // button), we suppress the pathname-based highlight so no stale item stays
+  // green underneath the modal.
   const anyModalOpen = showAddMedicine || showDispense
 
   const generalItems = [
@@ -162,44 +154,8 @@ export default function Sidebar() {
           <div className={styles.navSection}>
             {!collapsed && <span className={styles.navSectionLabel}>Menu</span>}
 
-            {/* Dashboard first */}
-            <Link
-              href={menuItems[0].href}
-              title={collapsed ? menuItems[0].name : undefined}
-              className={`${styles.navItem} ${pathname === menuItems[0].href && !anyModalOpen ? styles.navItemActive : ''}`}
-              style={collapsed ? { justifyContent: 'center', padding: '9px 0' } : undefined}>
-              {menuItems[0].icon}
-              {!collapsed && menuItems[0].name}
-            </Link>
-
-            {/* Add Medicine / Dispense Medicine — buttons, open modal in place,
-                no navigation, so only the modal shows on top of whatever page
-                you're currently viewing. */}
-            {actionItems.map(item => (
-              <button
-                key={item.name}
-                type="button"
-                onClick={item.onClick}
-                title={collapsed ? item.name : undefined}
-                className={`${styles.navItem} ${item.active ? styles.navItemActive : ''}`}
-                style={{
-                  width: '100%',
-                  textAlign: 'left',
-                  border: 'none',
-                  cursor: 'pointer',
-                  fontFamily: 'inherit',
-                  // navItemActive already supplies its own background/color via CSS;
-                  // only force transparent when NOT active so it doesn't fight that class.
-                  background: item.active ? undefined : 'transparent',
-                  ...(collapsed ? { justifyContent: 'center', padding: '9px 0' } : {}),
-                }}>
-                {item.icon}
-                {!collapsed && item.name}
-              </button>
-            ))}
-
-            {/* Remaining real pages */}
-            {menuItems.slice(1).map(item => (
+            {/* All real pages, including Dashboard first */}
+            {menuItems.map(item => (
               <Link
                 key={item.name}
                 href={item.href}
