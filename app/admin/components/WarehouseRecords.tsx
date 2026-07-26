@@ -1,6 +1,5 @@
 'use client'
-import React, { useEffect, useMemo, useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import React, { useMemo, useState } from 'react'
 import {
   useAdmin, useIsMobile, RecordPage, StatStrip, Toolbar, SearchInput, Segmented,
   Pill, DistBars, DataView, Drawer, Field, Section, downloadCSV, ExportBtn, type Column, type Tone,
@@ -13,23 +12,31 @@ interface Med {
   archived?: boolean; created_at?: string
 }
 
+/*
+  ── DB CONNECTION TEMPORARILY REMOVED ──────────────────────────────────────
+  Old database logic (Supabase fetch for warehouse_medicines) has been
+  stripped out while the new database is being set up. Renders with a
+  static empty array for now, so the UI shows its normal empty state.
+
+  TODO once new DB is ready:
+  1. Re-add `import { supabase } from '@/lib/supabase'`
+  2. Re-add load() querying the new warehouse table, plus a useEffect
+     that calls it on mount.
+  3. Wire `onRefresh` on <RecordPage> back to that loader (currently a
+     no-op below).
+  ───────────────────────────────────────────────────────────────────────── */
+
 export default function WarehouseRecords({ darkMode }: { darkMode: boolean }) {
   const t = useAdmin(darkMode)
   const mobile = useIsMobile()
 
-  const [meds, setMeds] = useState<Med[]>([])
-  const [loading, setLoading] = useState(true)
+  const [meds] = useState<Med[]>([])
+  const [loading] = useState(false)
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<'active' | 'archived' | 'expiring'>('active')
   const [view, setView] = useState<Med | null>(null)
 
-  const load = async () => {
-    setLoading(true)
-    const { data } = await supabase.from('warehouse_medicines').select('*').order('created_at', { ascending: false })
-    setMeds((data as Med[]) || [])
-    setLoading(false)
-  }
-  useEffect(() => { load() }, [])
+  const load = async () => {}
 
   const isExpired = (m: Med) => !!m.exp_date && new Date(m.exp_date) < new Date()
   const isExpiringSoon = (m: Med) => { if (!m.exp_date) return false; const d = (new Date(m.exp_date).getTime() - Date.now()) / 86400000; return d >= 0 && d <= 90 }

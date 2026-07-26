@@ -1,6 +1,5 @@
 'use client'
-import React, { useEffect, useMemo, useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import React, { useMemo, useState } from 'react'
 import { Pill as RxIcon, Warehouse as WhIcon } from 'lucide-react'
 import {
   useAdmin, RecordPage, StatStrip, Toolbar, SearchInput, Segmented,
@@ -31,49 +30,44 @@ interface WhMed {
 type TabId = 'pharmacy' | 'warehouse'
 type WhCat = 'all' | 'drug' | 'supply'
 
+/*
+  ── DB CONNECTION TEMPORARILY REMOVED ──────────────────────────────────────
+  Old database logic (Supabase fetches for pharma_medicines / inventory /
+  medicine_inventory / warehouse_medicines) has been stripped out while the
+  new database is being set up. Both tabs render with static empty arrays
+  for now, so the UI shows its normal empty state.
+
+  TODO once new DB is ready:
+  1. Re-add `import { supabase } from '@/lib/supabase'`
+  2. Re-add loadPharmacy()/loadWarehouse() functions that query the new
+     table(s), and a useEffect that calls them on mount.
+  3. Wire up `onRefresh` on <RecordPage> back to those loaders (currently
+     a no-op below).
+  ───────────────────────────────────────────────────────────────────────── */
+
 export default function MedicineInventory({ darkMode }: { darkMode: boolean }) {
   const t = useAdmin(darkMode)
   const [tab, setTab] = useState<TabId>('pharmacy')
 
-  /* ── Pharmacy state ──────────────────────────────────────────────────────*/
-  const [pItems, setPItems] = useState<PharmaItem[]>([])
-  const [pLoading, setPLoading] = useState(true)
-  const [pSource, setPSource] = useState('')
+  /* ── Pharmacy state (static/empty until new DB is connected) ────────────*/
+  const [pItems] = useState<PharmaItem[]>([])
+  const [pLoading] = useState(false)
+  const [pSource] = useState('')
   const [pSearch, setPSearch] = useState('')
   const [pFilter, setPFilter] = useState<'all' | 'low' | 'out' | 'expiring'>('all')
   const [pView, setPView] = useState<PharmaItem | null>(null)
 
-  /* ── Warehouse state ─────────────────────────────────────────────────────*/
-  const [wMeds, setWMeds] = useState<WhMed[]>([])
-  const [wLoading, setWLoading] = useState(true)
+  /* ── Warehouse state (static/empty until new DB is connected) ───────────*/
+  const [wMeds] = useState<WhMed[]>([])
+  const [wLoading] = useState(false)
   const [wSearch, setWSearch] = useState('')
   const [wFilter, setWFilter] = useState<'active' | 'archived' | 'expiring'>('active')
   const [wCat, setWCat] = useState<WhCat>('all')
   const [wView, setWView] = useState<WhMed | null>(null)
 
-  /* ── Loaders ─────────────────────────────────────────────────────────────*/
-  const loadPharmacy = async () => {
-    setPLoading(true)
-    const tries: [string, any][] = [
-      ['pharma_medicines', supabase.from('pharma_medicines').select('*').eq('archived', false).order('created_at', { ascending: false })],
-      ['inventory', supabase.from('inventory').select('*').order('created_at', { ascending: false })],
-      ['medicine_inventory', supabase.from('medicine_inventory').select('*').order('created_at', { ascending: false })],
-    ]
-    for (const [nm, q] of tries) {
-      const { data } = await q
-      if (data && data.length > 0) { setPItems(data); setPSource(nm); setPLoading(false); return }
-    }
-    setPItems([]); setPSource('pharma_medicines'); setPLoading(false)
-  }
-
-  const loadWarehouse = async () => {
-    setWLoading(true)
-    const { data } = await supabase.from('warehouse_medicines').select('*').order('created_at', { ascending: false })
-    setWMeds((data as WhMed[]) || [])
-    setWLoading(false)
-  }
-
-  useEffect(() => { loadPharmacy(); loadWarehouse() }, [])
+  /* ── Loaders (no-op placeholders; see TODO above) ───────────────────────*/
+  const loadPharmacy = async () => {}
+  const loadWarehouse = async () => {}
 
   /* ── Pharmacy helpers ────────────────────────────────────────────────────*/
   const pName = (i: PharmaItem) => i.med_name || i.medicine_name || i.generic_name || '—'

@@ -1,6 +1,5 @@
 'use client'
 import React, { useState, useEffect } from 'react'
-import { supabase } from '@/lib/supabase'
 import {
   Users, FlaskConical, Package, Activity, Heart, Pill,
   ClipboardList, Stethoscope, Baby, Milestone, Brain, ChevronDown, Check,
@@ -126,6 +125,23 @@ function YearMenu({ value, years, onChange, dark, bdr }: { value: number; years:
 
 const BarLabel = (p: any) => p.value ? <text x={p.x + p.width / 2} y={p.y - 4} fill="#9ca3af" textAnchor="middle" fontSize={9} fontWeight={700}>{p.value}</text> : null
 
+/*
+  ── ANALYTICS DATA TEMPORARILY REMOVED ─────────────────────────────────────
+  All Supabase analytics queries (user/patient/lab/inventory counts, disease
+  trends from soap_consultations, top prescribed medicines from
+  pharma_dispense, and the monthly patient registration chart) have been
+  stripped out while the new database is being set up. Every stat below is
+  static zero/empty data so the dashboard renders cleanly with nothing wired
+  up yet.
+
+  TODO once new DB is ready:
+  1. Re-add `import { supabase } from '@/lib/supabase'`
+  2. Re-add the Promise.all() stat-count queries, the soap_consultations
+     disease tally, the pharma_dispense top-meds tally, and fetchMonthly().
+  3. Re-add the two useEffect hooks that load this data on mount and on
+     year change.
+  ───────────────────────────────────────────────────────────────────────── */
+
 /* ── Dashboard ─────────────────────────────────────────────────────────────*/
 export default function Dashboard({ darkMode, onNavigate }: Props) {
   const dk = darkMode
@@ -139,99 +155,12 @@ export default function Dashboard({ darkMode, onNavigate }: Props) {
 
   const cardBox: React.CSSProperties = { background: card, border: `1.5px solid ${bdr}`, borderRadius: 16, padding: 16 }
 
-  const [stats, setStats] = useState({ users: 0, patients: 0, labs: 0, inventory: 0, consultations: 0, prescriptions: 0, lowStock: 0, pendingLabs: 0 })
-  const [diseases, setDiseases] = useState<{ name: string; count: number }[]>([])
-  const [topMeds, setTopMeds] = useState<{ name: string; count: number }[]>([])
-  const [monthly, setMonthly] = useState<{ month: string; patients: number }[]>(MONTHS.map(m => ({ month: m, patients: 0 })))
+  const [stats] = useState({ users: 0, patients: 0, labs: 0, inventory: 0, consultations: 0, prescriptions: 0, lowStock: 0, pendingLabs: 0 })
+  const [diseases] = useState<{ name: string; count: number }[]>([])
+  const [topMeds] = useState<{ name: string; count: number }[]>([])
+  const [monthly] = useState<{ month: string; patients: number }[]>(MONTHS.map(m => ({ month: m, patients: 0 })))
   const [year, setYear] = useState(new Date().getFullYear())
-  const [years, setYears] = useState<number[]>([new Date().getFullYear()])
-
-  const fetchMonthly = async (y: number) => {
-    const { data } = await supabase.from('patients').select('created_at')
-      .gte('created_at', `${y}-01-01`).lte('created_at', `${y}-12-31T23:59:59`)
-    const counts = MONTHS.map(() => 0)
-    ;(data ?? []).forEach((r: any) => { if (r.created_at) counts[new Date(r.created_at).getMonth()]++ })
-    setMonthly(MONTHS.map((m, i) => ({ month: m, patients: counts[i] })))
-  }
-
-  useEffect(() => {
-    const now = new Date()
-    const load = async () => {
-      const [u, p, l, inv, c, pr, low, pend] = await Promise.all([
-        supabase.from('users').select('user_id', { count: 'exact', head: true }),
-        supabase.from('patients').select('id', { count: 'exact', head: true }),
-        supabase.from('laboratory_requests').select('id', { count: 'exact', head: true }),
-        supabase.from('pharma_medicines').select('id', { count: 'exact', head: true }).eq('archived', false),
-        supabase.from('soap_consultations').select('id', { count: 'exact', head: true }),
-        supabase.from('prescriptions').select('id', { count: 'exact', head: true }),
-        supabase.from('pharma_medicines').select('id', { count: 'exact', head: true }).eq('archived', false).lte('quantity', 10),
-        supabase.from('laboratory_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
-      ])
-      setStats({
-        users: u.count || 0, patients: p.count || 0, labs: l.count || 0, inventory: inv.count || 0,
-        consultations: c.count || 0, prescriptions: pr.count || 0, lowStock: low.count || 0, pendingLabs: pend.count || 0,
-      })
-
-      const { data: soapRows } = await supabase
-        .from('soap_consultations')
-        .select('assessments, icd10_codes')
-        .limit(2000)
-
-      if (soapRows) {
-        const tally: Record<string, number> = {}
-
-        soapRows.forEach((r: any) => {
-          const source = Array.isArray(r.assessments) && r.assessments.length > 0
-            ? r.assessments
-            : Array.isArray(r.icd10_codes)
-              ? r.icd10_codes
-              : []
-
-          source.forEach((item: any) => {
-            const name = String(item ?? '').trim()
-            if (name) tally[name] = (tally[name] || 0) + 1
-          })
-        })
-
-        setDiseases(
-          Object.entries(tally)
-            .map(([name, count]) => ({ name, count }))
-            .sort((a, b) => b.count - a.count)
-            .slice(0, 6)
-        )
-      }
-
-      const { data: dispensedMeds } = await supabase
-        .from('pharma_dispense')
-        .select('med_name, quantity')
-        .limit(2000)
-
-      if (dispensedMeds) {
-        const tally: Record<string, number> = {}
-
-        dispensedMeds.forEach((r: any) => {
-          const name = String(r.med_name ?? '').trim()
-          const qty = Number(r.quantity ?? 1)
-          if (name) tally[name] = (tally[name] || 0) + (Number.isFinite(qty) && qty > 0 ? qty : 1)
-        })
-
-        setTopMeds(
-          Object.entries(tally)
-            .map(([name, count]) => ({ name, count }))
-            .sort((a, b) => b.count - a.count)
-            .slice(0, 6)
-        )
-      }
-
-      const { data: yr } = await supabase.from('patients').select('created_at').not('created_at', 'is', null)
-      const set = new Set<number>([now.getFullYear()])
-      ;(yr ?? []).forEach((r: any) => { if (r.created_at) set.add(new Date(r.created_at).getFullYear()) })
-      setYears(Array.from(set).sort((a, b) => b - a))
-    }
-    load(); fetchMonthly(year)
-  }, [])
-
-  useEffect(() => { fetchMonthly(year) }, [year])
+  const [years] = useState<number[]>([new Date().getFullYear()])
 
   const maxDis = Math.max(...diseases.map(d => d.count), 1)
   const maxMed = Math.max(...topMeds.map(m => m.count), 1)
