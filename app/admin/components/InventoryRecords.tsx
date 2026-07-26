@@ -1,6 +1,5 @@
 'use client'
-import React, { useEffect, useMemo, useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import React, { useMemo, useState } from 'react'
 import {
   useAdmin, useIsMobile, RecordPage, StatStrip, Toolbar, SearchInput, Segmented,
   Pill, DistBars, DataView, Drawer, Field, Section, downloadCSV, ExportBtn, type Column, type Tone,
@@ -14,33 +13,33 @@ interface Item {
   reorder_level?: number; created_at?: string
 }
 
+/*
+  ── DB CONNECTION TEMPORARILY REMOVED ──────────────────────────────────────
+  Old database logic (Supabase fallback-chain fetch across pharma_medicines /
+  warehouse_medicines / inventory / medicine_inventory) has been stripped out
+  while the new database is being set up. Renders with a static empty array
+  for now, so the UI shows its normal empty state.
+
+  TODO once new DB is ready:
+  1. Re-add `import { supabase } from '@/lib/supabase'`
+  2. Re-add load() querying the new table(s), plus a useEffect that calls
+     it on mount.
+  3. Wire `onRefresh` on <RecordPage> back to that loader (currently a
+     no-op below).
+  ───────────────────────────────────────────────────────────────────────── */
+
 export default function InventoryRecords({ darkMode }: { darkMode: boolean }) {
   const t = useAdmin(darkMode)
   const mobile = useIsMobile()
 
-  const [items, setItems] = useState<Item[]>([])
-  const [loading, setLoading] = useState(true)
-  const [source, setSource] = useState('')
+  const [items] = useState<Item[]>([])
+  const [loading] = useState(false)
+  const [source] = useState('')
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<'all' | 'low' | 'out' | 'expiring'>('all')
   const [view, setView] = useState<Item | null>(null)
 
-  // Same fallback chain as your original: pharma → warehouse → inventory → medicine_inventory
-  const load = async () => {
-    setLoading(true)
-    const tries: [string, any][] = [
-      ['pharma_medicines', supabase.from('pharma_medicines').select('*').eq('archived', false).order('created_at', { ascending: false })],
-      ['warehouse_medicines', supabase.from('warehouse_medicines').select('*').eq('archived', false).order('created_at', { ascending: false })],
-      ['inventory', supabase.from('inventory').select('*').order('created_at', { ascending: false })],
-      ['medicine_inventory', supabase.from('medicine_inventory').select('*').order('created_at', { ascending: false })],
-    ]
-    for (const [name, q] of tries) {
-      const { data } = await q
-      if (data && data.length > 0) { setItems(data); setSource(name); setLoading(false); return }
-    }
-    setItems([]); setSource('pharma_medicines'); setLoading(false)
-  }
-  useEffect(() => { load() }, [])
+  const load = async () => {}
 
   const name = (i: Item) => i.med_name || i.medicine_name || i.generic_name || '—'
   const dose = (i: Item) => i.med_dosage || '—'

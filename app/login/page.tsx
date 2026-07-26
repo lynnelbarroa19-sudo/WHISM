@@ -1,13 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { supabase, getRouteForRole } from "@/lib/supabase";
 import { useAuth, AuthUser } from "@/context/AuthContext";
 import { logAction } from "@/app/utils/auditLogs";
 import styles from "./login.module.css";
+import Captcha, { CaptchaRef } from "@/components/Captcha";
+import RecaptchaWidget from "@/components/RecaptchaWidget";
+import OtpInput from "@/components/OtpInput";
+import type ReCAPTCHA from "react-google-recaptcha";
 
-type Screen = "access" | "member" | "admin" | "changepass";
+type Screen = "access" | "member" | "admin" | "otp" | "changepass";
 
 function makeInitials(first: string, last: string) {
   return `${first[0] ?? ""}${last[0] ?? ""}`.toUpperCase();
@@ -24,6 +28,18 @@ export default function LoginPage() {
   const [remember, setRemember] = useState(false);
   const [error,    setError]    = useState("");
   const [loading,  setLoading]  = useState(false);
+  const [captchaAnswer, setCaptchaAnswer] = useState("");
+  const captchaRef = useRef<CaptchaRef>(null);
+  const recaptchaRef = useRef<ReCAPTCHA>(null);
+
+  // OTP state
+  const [otpDigits, setOtpDigits] = useState<string[]>(["", "", "", ""]);
+  const [otpToken,  setOtpToken]  = useState("");
+  const [otpError,  setOtpError]  = useState("");
+  const [otpLoading, setOtpLoading] = useState(false);
+  const [otpTimer,  setOtpTimer]  = useState(0);
+  const [pendingUser, setPendingUser] = useState<any>(null);
+  const [pendingForAdmin, setPendingForAdmin] = useState(false);
 
   const [currentPw,   setCurrentPw]   = useState("");
   const [newPw,       setNewPw]       = useState("");
@@ -40,31 +56,94 @@ export default function LoginPage() {
     { label: "Must have a number.",                                 met: /\d/.test(newPw) },
   ];
 
+  // Countdown timer for OTP resend cooldown
+  useEffect(() => {
+    if (otpTimer <= 0) return;
+    const id = setInterval(() => setOtpTimer((t) => Math.max(0, t - 1)), 1000);
+    return () => clearInterval(id);
+  }, [otpTimer]);
+
   function reset() {
     setEmail(""); setPassword(""); setError("");
     setShowPass(false); setRemember(false);
+    setCaptchaAnswer("");
+    recaptchaRef.current?.reset();
+    setOtpDigits(["", "", "", ""]);
+    setOtpToken(""); setOtpError(""); setOtpTimer(0);
+    setPendingUser(null); setPendingForAdmin(false);
   }
 
   // ─────────────────────────────────────────────────────────────
-  //  SIGN IN
+  //  SEND OTP
+  // ─────────────────────────────────────────────────────────────
+  async function sendOtp(targetEmail: string) {
+    const res = await fetch("/api/otp/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: targetEmail }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.token) throw new Error(data.error ?? "Failed to send OTP.");
+    setOtpToken(data.token);
+    setOtpTimer(60); // 60s cooldown before resend is allowed
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  SIGN IN  (validates credentials, then triggers OTP)
   // ─────────────────────────────────────────────────────────────
   async function handleSignIn(e: React.FormEvent, forAdmin = false) {
     e.preventDefault();
     setError(""); setLoading(true);
+
+    // 1. Verify custom image captcha
+    const captchaValid = await captchaRef.current?.verify(captchaAnswer);
+    if (!captchaValid) {
+      setError("Incorrect captcha. Please try again.");
+      captchaRef.current?.refresh();
+      setCaptchaAnswer("");
+      setLoading(false);
+      return;
+    }
+
+    // 2. Verify Google reCAPTCHA
+    const recaptchaToken = recaptchaRef.current?.getValue();
+    if (!recaptchaToken) {
+      setError("Please verify that you are not a robot.");
+      setLoading(false);
+      return;
+    }
+    try {
+      const verifyRes = await fetch("/api/recaptcha/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: recaptchaToken }),
+      });
+      const verifyData = await verifyRes.json();
+      if (!verifyData.success) {
+        setError("reCAPTCHA verification failed. Please try again.");
+        recaptchaRef.current?.reset();
+        setLoading(false);
+        return;
+      }
+    } catch {
+      setError("Could not verify reCAPTCHA. Please try again.");
+      recaptchaRef.current?.reset();
+      setLoading(false);
+      return;
+    }
 
     const cleanEmail = email.trim().toLowerCase();
 
     try {
       let userRecord: any = null;
 
-      // 1. Try signing in directly with email
+      // 3. Try signing in directly with email
       const { error: authErr } = await supabase.auth.signInWithPassword({
         email: cleanEmail,
         password,
       });
 
       if (!authErr) {
-        // Signed in with full email
         const { data: { user: supaUser } } = await supabase.auth.getUser();
         const { data: profile, error: pe } = await supabase
           .from("users")
@@ -84,7 +163,7 @@ export default function LoginPage() {
         }
         userRecord = profile;
       } else {
-        // 2. Try matching by email prefix (in case partial email was typed)
+        // 4. Try matching by email prefix (in case partial email was typed)
         const { data: list, error: qe } = await supabase
           .from("users")
           .select("*")
@@ -108,7 +187,7 @@ export default function LoginPage() {
         userRecord = found;
       }
 
-      // 2.5 Account status check — block inactive users
+      // 5. Account status check — block suspended / inactive users
       // NOTE: users_status_check constraint only allows 'active' | 'inactive'.
       // Any other value (or a missing column) falls through to the generic message.
       const acctStatus = String(userRecord.status ?? "active").toLowerCase();
@@ -121,58 +200,116 @@ export default function LoginPage() {
         throw new Error(reason);
       }
 
-      // 3. Role checks
+      // 6. Role checks
       const role = String(userRecord.role ?? "").toLowerCase();
       if (!role) throw new Error("This account has no role assigned. Contact the administrator.");
       if (forAdmin && role !== "admin") throw new Error("Access denied. Admin only.");
       if (!forAdmin && role === "admin") throw new Error("Use the Admin login instead.");
 
-      // 4. Build auth user object
-      const loggedInUser: AuthUser = {
-        id:           userRecord.user_id,
-        name:         `${userRecord.first_name} ${userRecord.last_name}`,
-        firstName:    userRecord.first_name,
-        lastName:     userRecord.last_name,
-        role,
-        initials:     makeInitials(userRecord.first_name, userRecord.last_name),
-        email:        userRecord.email,
-        isFirstLogin: userRecord.is_first_login,
-      };
+      // 7. Credentials valid — sign out immediately, gate access behind OTP
+      await supabase.auth.signOut();
+      setPendingUser(userRecord);
+      setPendingForAdmin(forAdmin);
 
-      login(loggedInUser);
-
-      // 5. Audit log — success
-      await logAction({
-        user_name:   `${userRecord.first_name} ${userRecord.last_name}`,
-        user_role:   userRecord.role,
-        action:      "LOGIN",
-        module:      "Auth",
-        description: `${userRecord.role} logged in (${userRecord.email})`,
-        status:      "success",
-      });
-
-      // 6. First-login → force password change
-      if (userRecord.is_first_login) {
-        setScreen("changepass");
-        setLoading(false);
-        return;
-      }
-
-      router.push(getRouteForRole(role));
+      // 8. Send the OTP email
+      await sendOtp(userRecord.email);
+      setOtpDigits(["", "", "", ""]);
+      setOtpError("");
+      setScreen("otp");
     } catch (err: any) {
       setError(err.message ?? "Invalid credentials.");
+      captchaRef.current?.refresh();
+      setCaptchaAnswer("");
+      recaptchaRef.current?.reset();
 
       // Audit log — failure
       await logAction({
         user_name:   email.trim() || "Unknown",
-        user_role:   "—",
-        action:      "FAILED_LOGIN",
+        user_role:   forAdmin ? "admin" : "member",
+        action:      "LOGIN",
         module:      "Auth",
-        description: `Failed login attempt: ${email.trim()} — ${err.message}`,
-        status:      "error",
+        description: `Failed login attempt (${email.trim()}): ${err.message ?? "Invalid credentials."}`,
+        status:      "failed",
       });
     } finally {
       setLoading(false);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  VERIFY OTP  (completes the actual login)
+  // ─────────────────────────────────────────────────────────────
+  async function handleOtpSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setOtpError(""); setOtpLoading(true);
+
+    try {
+      const code = otpDigits.join("");
+      if (code.length < 4) throw new Error("Please enter the full 4-digit code.");
+      if (!pendingUser) throw new Error("Session expired. Please sign in again.");
+
+      // 1. Verify the code against the server
+      const res = await fetch("/api/otp/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: pendingUser.email, code, token: otpToken }),
+      });
+      const data = await res.json();
+      if (!data.valid) throw new Error("Incorrect or expired code. Please try again.");
+
+      // 2. Re-authenticate to restore the Supabase session
+      const { error: reAuthErr } = await supabase.auth.signInWithPassword({
+        email: pendingUser.email,
+        password,
+      });
+      if (reAuthErr) throw new Error("Could not restore session. Please sign in again.");
+
+      // 3. Build auth user object
+      const loggedInUser: AuthUser = {
+        id:           pendingUser.user_id,
+        name:         `${pendingUser.first_name} ${pendingUser.last_name}`,
+        firstName:    pendingUser.first_name,
+        lastName:     pendingUser.last_name,
+        role:         pendingUser.role.toLowerCase(),
+        initials:     makeInitials(pendingUser.first_name, pendingUser.last_name),
+        email:        pendingUser.email,
+        isFirstLogin: pendingUser.is_first_login,
+      };
+
+      login(loggedInUser);
+
+      // 4. Audit log — success
+      await logAction({
+        user_name:   `${pendingUser.first_name} ${pendingUser.last_name}`,
+        user_role:   pendingUser.role,
+        action:      "LOGIN",
+        module:      "Auth",
+        description: `${pendingUser.role} logged in (${pendingUser.email})`,
+        status:      "success",
+      });
+
+      // 5. First-login → force password change
+      if (pendingUser.is_first_login) {
+        setScreen("changepass");
+        setOtpLoading(false);
+        return;
+      }
+
+      router.push(getRouteForRole(pendingUser.role.toLowerCase()));
+    } catch (err: any) {
+      setOtpError(err.message ?? "Verification failed.");
+    } finally {
+      setOtpLoading(false);
+    }
+  }
+
+  async function handleResendOtp() {
+    if (otpTimer > 0 || !pendingUser) return;
+    setOtpError("");
+    try {
+      await sendOtp(pendingUser.email);
+    } catch (err: any) {
+      setOtpError(err.message ?? "Failed to resend code.");
     }
   }
 
@@ -255,7 +392,7 @@ export default function LoginPage() {
       // 9. Navigate to the correct dashboard
       router.push(getRouteForRole(userRole));
     } catch (err: any) {
-      setCpError(err.message);
+      setCpError(err.message ?? "Something went wrong. Please try again.");
     } finally {
       setCpLoading(false);
     }
@@ -363,6 +500,69 @@ export default function LoginPage() {
             </button>
 
           </div>
+        </div>
+        <Footer />
+      </div>
+    </div>
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  //  SCREEN: ENTER OTP
+  // ─────────────────────────────────────────────────────────────
+  if (screen === "otp") return (
+    <div className={styles.page}>
+      <HeroPanel />
+      <div className={styles.formPanel}>
+        <div className={styles.formTop}>
+          <LogoBlock />
+          <form className={styles.formInner} onSubmit={handleOtpSubmit}>
+            <p className={styles.formRole}>Enter OTP</p>
+            <p className={styles.formRoleSub}>
+              We sent a 4-digit code to {pendingUser?.email ?? "your email"}
+            </p>
+
+            {otpError && (
+              <div className={styles.errorBox}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                {otpError}
+              </div>
+            )}
+
+            <div style={{ margin: "20px 0" }}>
+              <OtpInput length={4} value={otpDigits} onChange={setOtpDigits} disabled={otpLoading} />
+            </div>
+
+            <p style={{ textAlign: "center", fontSize: 12, color: "#6b7280", marginBottom: 12 }}>
+              {otpTimer > 0 ? `Resend available in ${otpTimer}s` : "Didn't get the code?"}
+            </p>
+
+            <button className={styles.signInBtn} type="submit" disabled={otpLoading}>
+              {otpLoading ? "Verifying…" : "VERIFY"}
+            </button>
+
+            <button
+              type="button"
+              className={styles.backBtn}
+              disabled={otpTimer > 0}
+              onClick={handleResendOtp}
+              style={{ opacity: otpTimer > 0 ? 0.5 : 1 }}
+            >
+              Resend OTP
+            </button>
+
+            <button
+              type="button"
+              className={styles.backBtn}
+              onClick={() => { reset(); setScreen("access"); }}
+            >
+              ← Return to Access Point
+            </button>
+          </form>
         </div>
         <Footer />
       </div>
@@ -568,8 +768,27 @@ export default function LoginPage() {
               </button>
             </div>
 
+            <div className={styles.fieldGroup}>
+              <label className={styles.fieldLabel}>Captcha:</label>
+              <Captcha ref={captchaRef} />
+              <input
+                className={styles.fieldInput}
+                type="text"
+                placeholder="Enter the code above"
+                value={captchaAnswer}
+                onChange={e => setCaptchaAnswer(e.target.value)}
+                required
+                style={{ marginTop: 8 }}
+              />
+            </div>
+
+            <div className={styles.fieldGroup}>
+              <label className={styles.fieldLabel}>Verify:</label>
+              <RecaptchaWidget ref={recaptchaRef} />
+            </div>
+
             <button className={styles.signInBtn} type="submit" disabled={loading}>
-              {loading ? "Signing in…" : "SIGN IN"}
+              {loading ? "Verifying…" : "NEXT"}
             </button>
 
             <button type="button" className={styles.backBtn}
