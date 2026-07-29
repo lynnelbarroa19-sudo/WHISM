@@ -1,8 +1,8 @@
-'use client'
+"use client";
 import React, { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/context/AuthContext'
-import { useTheme } from '@/lib/theme'
+import { useTheme } from '../lib/pharmacy'
 import { supabase } from '@/lib/supabase'
 
 type NotifKind = 'prescription' | 'restock'
@@ -19,8 +19,6 @@ type Notification = {
 }
 
 // ── Date helper ───────────────────────────────────────────────────────────────
-// Formats an ISO date string as "Jun 20, 2026" the same way the medtech side
-// does, so prescription notifications read consistently across roles.
 function fmtDate(iso: string): string {
   try {
     return new Date(iso).toLocaleDateString('en-PH', {
@@ -32,11 +30,6 @@ function fmtDate(iso: string): string {
 }
 
 // ── Persisted read state ─────────────────────────────────────────────────────
-// Notification "read" status only lives in this component's React state, and
-// the prescriptions/restock_requests tables have no read/is_read column to
-// write it back to. To survive a page reload without a schema change, we
-// keep the set of read notification IDs in localStorage, scoped per
-// pharmacist so different logins on the same browser don't share state.
 function readStorageKey(pharmacistName: string): string {
   return `pharma_notif_read:${pharmacistName || 'anon'}`
 }
@@ -63,13 +56,67 @@ function saveReadIds(pharmacistName: string, ids: Set<string>) {
   }
 }
 
-// `onNavigate` now accepts an optional settings tab so menu items like
-// "Change Password" can tell page.tsx which tab to land on. page.tsx is the
-// sole owner of the URL (it mirrors activePage/settingsTab → URL in its own
-// effect) — Topbar only calls onNavigate and never touches router.push
-// itself, to avoid racing that effect (see goTo() below for the history of
-// that bug).
 type NavigateFn = (page: string, tab?: 'profile' | 'password') => void
+
+// ── Toast (global toast notification) ─────────────────────────────
+type Props = {
+  message: string;
+  type: "success" | "error";
+  onDone: () => void;
+};
+
+export function Toast({ message, type, onDone }: Props) {
+  useEffect(() => {
+    const id = setTimeout(onDone, 3000);
+    return () => clearTimeout(id);
+  }, [onDone]);
+
+  return (
+    <div style={{
+      position: "fixed", bottom: 24, right: 24, zIndex: 9999,
+      background: type === "success" ? "#1a5e35" : "#d63031",
+      color: "#fff", borderRadius: 10, padding: "12px 20px",
+      fontSize: 13, fontWeight: 700, boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+      display: "flex", alignItems: "center", gap: 8, maxWidth: 320,
+    }}>
+      <span style={{ fontSize: 16 }}>{type === "success" ? "✓" : "✕"}</span>
+      {message}
+    </div>
+  );
+}
+
+// ── Brand mark ────────────────────────────────────────────────────────────────
+// SMARTRHU wordmark: a small Rx-glyph mark + two-weight wordmark + a
+// "Pharmacy" role tag, so the brand reads clearly next to the other role
+// portals (Lab, Warehouse, etc.) that share this shell.
+function BrandMark() {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+      <div style={{
+        width: 36, height: 36, borderRadius: 10, flexShrink: 0,
+        background: 'linear-gradient(135deg,#22c55e,#0d9488)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        boxShadow: '0 3px 10px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.25)',
+      }}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2v-4M9 21H5a2 2 0 0 1-2-2v-4m0 0h18"/>
+        </svg>
+      </div>
+      <div style={{ lineHeight: 1.15 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 1 }}>
+          <span style={{ color: '#fff', fontSize: 17, fontWeight: 800, letterSpacing: '-0.01em' }}>SMART</span>
+          <span style={{ color: '#4ade80', fontSize: 17, fontWeight: 800, letterSpacing: '-0.01em' }}>RHU</span>
+        </div>
+        <div style={{
+          fontSize: 9.5, fontWeight: 700, letterSpacing: 1.4, textTransform: 'uppercase',
+          color: 'rgba(255,255,255,0.55)', marginTop: 1,
+        }}>
+          Pharmacy
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
   const { user }         = useAuth()
@@ -85,9 +132,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
   const [showNotif,     setShowNotif]     = useState(false)
   const [notifications, setNotifications] = useState<Notification[]>([])
 
-  // ── Logout confirmation modal — mirrors Sidebar.tsx's modal exactly
-  //    (same markup/inline styles) so Topbar and Sidebar logout behave
-  //    identically instead of Topbar signing out immediately on click.
   const [showLogoutModal, setShowLogoutModal] = useState(false)
 
   const profileRef = useRef<HTMLDivElement>(null)
@@ -115,7 +159,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     }
   }
 
-  // ── Listen to settings save events ────────────────────────────────────────
   useEffect(() => {
     window.addEventListener('profileUpdated', fetchProfile)
     window.addEventListener('avatarUpdated',  fetchProfile)
@@ -135,7 +178,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     return () => clearInterval(id)
   }, [])
 
-  // ── Close dropdowns on outside click ──────────────────────────────────────
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (profileRef.current && !profileRef.current.contains(e.target as Node)) setShowProfile(false)
@@ -145,10 +187,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  // ── Fetch existing unread prescription notifications ───────────────────────
-  // Joins the patients table so the notification shows the actual patient's
-  // name and the prescription date, instead of a generic "Doctor → Patient"
-  // placeholder — matches the format used on the medtech side.
   useEffect(() => {
     fetchPrescriptionNotifications()
   }, [])
@@ -180,9 +218,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     }
   }
 
-  // Builds a prescription notification from a row that has a joined
-  // `patients` relation — used by both the initial fetch and (after a
-  // follow-up lookup) the realtime INSERT handler below.
   function buildPrescriptionNotif(row: any): Notification {
     const p = row.patients
     const patientName = p
@@ -200,7 +235,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     }
   }
 
-  // ── Fetch recent restock-status notifications for this pharmacist ──────────
   const fetchRestockNotifications = async (pharmacistName: string) => {
     if (!pharmacistName) return
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
@@ -266,11 +300,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
       .slice(0, 30)
   }
 
-  // ── Real-time: listen for new prescriptions ────────────────────────────────
-  // The INSERT payload only contains the raw prescriptions row (no joined
-  // patient), so we follow up with a quick lookup to resolve the patient's
-  // name before building the notification — keeps it consistent with the
-  // initial fetch instead of falling back to a placeholder.
   useEffect(() => {
     const channel = supabase
       .channel('pharma_prescriptions_notif')
@@ -298,7 +327,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ── Real-time: listen for restock status changes by warehouse ─────────────
   useEffect(() => {
     const channel = supabase
       .channel('pharma_restock_status_notif')
@@ -322,7 +350,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     return () => { supabase.removeChannel(channel) }
   }, [])
 
-  // ── Mark all as read ───────────────────────────────────────────────────────
   const markAllRead = () => {
     setNotifications(prev => {
       for (const n of prev) readIdsRef.current.add(n.id)
@@ -331,7 +358,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     })
   }
 
-  // ── Mark single as read ────────────────────────────────────────────────────
   const markRead = (id: string) => {
     readIdsRef.current.add(id)
     saveReadIds(displayNameRef.current, readIdsRef.current)
@@ -358,7 +384,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: '50%',
     width: 38, height: 38, cursor: 'pointer',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
-    position: 'relative', flexShrink: 0, transition: 'background 0.15s',
+    position: 'relative', flexShrink: 0, transition: 'background 0.15s, transform 0.15s',
   }
 
   const AvatarCircle = ({ size = 32, fontSize = 13 }: { size?: number; fontSize?: number }) => (
@@ -375,42 +401,11 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     </div>
   )
 
-  // Routes a profile-menu click through onNavigate only. page.tsx owns the
-  // URL (it has its own effect that mirrors activePage/settingsTab → the
-  // address bar via router.replace) — this function used to ALSO call
-  // router.push() directly with the tab in the query string, which raced
-  // that effect. Whichever one ran last won, and since page.tsx's old
-  // handleNavigate ignored the tab argument completely (always forcing
-  // settingsTab back to "profile"), its router.replace would usually fire
-  // after this router.push and silently overwrite ?tab=password back to
-  // ?tab=profile — which is why "Change Password" and "Settings" both
-  // appeared to do nothing different from "My Profile". Now this only
-  // calls onNavigate(page, tab); page.tsx's effect is the single source of
-  // truth for the URL, the same pattern already used for notification
-  // clicks (see handleNotifClick below).
   const goTo = (page: string, tab?: 'profile' | 'password') => {
     setShowProfile(false)
     onNavigate?.(page, tab)
   }
 
-  // Routes a clicked notification to the right page using only the
-  // in-app onNavigate callback (page.tsx's setActivePage). We deliberately
-  // do NOT also call router.push here — page.tsx already mirrors
-  // activePage -> URL in its own effect, and calling router.push directly
-  // raced with that effect, sometimes leaving the pharmacist looking at
-  // Dashboard (with its own prescription slip modal) while the address bar
-  // said ?page=prescriptions. Letting onNavigate drive activePage and
-  // letting page.tsx own the URL avoids that mismatch entirely.
-  // Both notification kinds now land on Dashboard, since Dashboard already
-  // has its own Prescriptions panel (with the same RHU slip view) and its
-  // own restock-requests modal — a separate full Prescriptions page was
-  // redundant duplication of that panel.
-  //
-  // For a prescription notification specifically, we also dispatch the
-  // underlying prescription's id (stripped of the "presc-" prefix used to
-  // namespace notification ids) so Dashboard can open that exact RHU slip
-  // immediately — instead of just landing on the panel and making the
-  // pharmacist re-find and click the row themselves.
   const handleNotifClick = (n: Notification) => {
     markRead(n.id)
     setShowNotif(false)
@@ -423,15 +418,11 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     }
   }
 
-  // ── Opens the confirmation modal instead of signing out immediately.
-  //    The dropdown closes right away so the modal isn't shown behind it.
   const requestLogout = () => {
     setShowProfile(false)
     setShowLogoutModal(true)
   }
 
-  // ── Actually performs the logout — only called from the modal's
-  //    LOGOUT button.
   const handleLogout = async () => {
     setShowLogoutModal(false)
     await supabase.auth.signOut()
@@ -495,41 +486,42 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
 
   return (
     <header style={{
-      background: '#1b3a1b', height: 64,
+      background: 'linear-gradient(90deg,#173617,#1b3a1b 55%,#173617)', height: 64,
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       padding: '0 24px', position: 'sticky', top: 0, zIndex: 40,
       boxShadow: '0 1px 6px rgba(0,0,0,0.25)', gap: 16,
+      borderBottom: '1px solid rgba(74,222,128,0.18)',
     }}>
 
-      <h2 style={{
-        color: '#fff', fontSize: 18, fontWeight: 700, margin: 0,
-        letterSpacing: '-.01em', whiteSpace: 'nowrap', flexShrink: 0,
-      }}>
-        SMARTRHU
-      </h2>
-
-     
+      <BrandMark />
 
       {/* ── Right section ── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
 
         {/* Clock */}
         <div style={{
-          color: 'rgba(255,255,255,0.7)', fontSize: 12, fontWeight: 600,
+          color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: 700,
           letterSpacing: 0.5, whiteSpace: 'nowrap',
-          background: 'rgba(255,255,255,0.07)', borderRadius: 20, padding: '5px 14px',
+          background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.08)',
+          borderRadius: 20, padding: '6px 14px',
           fontVariantNumeric: 'tabular-nums',
+          display: 'flex', alignItems: 'center', gap: 6,
         }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/>
+          </svg>
           {time}
         </div>
+
+        <div style={{ width: 1, height: 26, background: 'rgba(255,255,255,0.12)', flexShrink: 0 }} />
 
         {/* ── Notification bell ── */}
         <div ref={notifRef} style={{ position: 'relative' }}>
           <button
             onClick={() => setShowNotif(p => !p)}
-            style={iconBtn}
-            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.18)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.1)')}
+            style={{ ...iconBtn, background: showNotif ? 'rgba(255,255,255,0.2)' : iconBtn.background }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.2)')}
+            onMouseLeave={e => (e.currentTarget.style.background = showNotif ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.1)')}
           >
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
               <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
@@ -551,11 +543,11 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
               position: 'absolute', right: 0, top: 'calc(100% + 10px)',
               background: '#fff', borderRadius: 16, width: 330,
               boxShadow: '0 8px 32px rgba(0,0,0,0.18)', overflow: 'hidden', zIndex: 100,
-              animation: 'fadeDown 0.15s ease',
+              animation: 'fadeDown 0.15s ease', border: '1px solid rgba(0,0,0,0.04)',
             }}>
               {/* Header */}
               <div style={{
-                padding: '12px 16px', borderBottom: '1px solid #f0fdf4',
+                padding: '14px 16px', borderBottom: '1px solid #f0fdf4',
                 display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -582,9 +574,14 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
               <div style={{ maxHeight: 340, overflowY: 'auto' }}>
                 {notifications.length === 0 ? (
                   <div style={{
-                    padding: '28px 16px', textAlign: 'center',
-                    color: '#9ca3af', fontSize: 12, fontStyle: 'italic',
+                    padding: '32px 16px', textAlign: 'center',
+                    color: '#9ca3af', fontSize: 12,
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
                   }}>
+                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#c7d9cd" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                      <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                    </svg>
                     No new notifications
                   </div>
                 ) : (
@@ -631,7 +628,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
 
         {/* ── Dark mode ── */}
         <button onClick={toggle} style={iconBtn}
-          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.18)')}
+          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.2)')}
           onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.1)')}>
           {dark
             ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
@@ -647,6 +644,8 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
           }
         </button>
 
+        <div style={{ width: 1, height: 26, background: 'rgba(255,255,255,0.12)', flexShrink: 0 }} />
+
         {/* ── User pill + dropdown ── */}
         <div ref={profileRef} style={{ position: 'relative' }}>
           <div onClick={() => setShowProfile(p => !p)} style={{
@@ -656,7 +655,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
             border: showProfile ? '1px solid rgba(255,255,255,0.3)' : '1px solid transparent',
             transition: 'all 0.15s',
           }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.18)')}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.2)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.12)')}>
             <AvatarCircle size={32} fontSize={13} />
             <div>
@@ -720,8 +719,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
 
               <div style={{ height: 1, background: '#f0fdf4' }} />
 
-              {/* ── Logout now opens the confirmation modal instead of
-                  signing out immediately ── */}
               <button onClick={requestLogout} style={{
                 width: '100%', padding: '11px 16px', textAlign: 'left',
                 border: 'none', background: 'transparent', cursor: 'pointer',
@@ -739,7 +736,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
         </div>
       </div>
 
-      {/* ── Logout Confirmation Modal (same markup/styles as Sidebar.tsx) ── */}
+      {/* ── Logout Confirmation Modal (standardized 400px / 16px header) ── */}
       {showLogoutModal && (
         <div
           onClick={() => setShowLogoutModal(false)}
@@ -747,7 +744,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
             position: 'fixed', inset: 0,
             background: 'rgba(0,0,0,0.45)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            zIndex: 1000,
+            zIndex: 1000, padding: 16,
           }}
         >
           <div
@@ -755,7 +752,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
             style={{
               background: '#fff',
               borderRadius: 16,
-              width: 400,
+              width: '100%', maxWidth: 400,
               overflow: 'hidden',
               boxShadow: '0 20px 60px rgba(0,0,0,0.25)',
             }}
@@ -786,10 +783,9 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
 
             {/* Modal body */}
             <div style={{
-              padding: '36px 28px 28px',
+              padding: '32px 24px 24px',
               display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
             }}>
-              {/* Icon circle */}
               <div style={{
                 width: 64, height: 64, borderRadius: '50%',
                 background: '#fef2f2',
