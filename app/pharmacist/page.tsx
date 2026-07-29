@@ -1,60 +1,42 @@
 "use client";
 import { useState, useCallback, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ThemeCtx, LIGHT, DARK } from "@/lib/theme";
 import { supabase } from "@/lib/supabase";
-import { Medicine } from "@/lib/types";
+import { ThemeCtx, LIGHT, DARK } from "./lib/pharmacy";
 
-import Sidebar                from "./components/Sidebar";
-import Topbar                 from "./components/Topbar";
-import Toast                  from "./components/Toast";
-import RestockModal           from "./components/modal/RestockModal";
-import ViewRequestsModal      from "./components/modal/ViewRequestModal";
-import RestockConfirmListener from "./components/RestockConfirmListener";
-import Dashboard              from "./components/pages/Dashboard";
-import MedicineStockPage      from "./components/pages/MedicineStockPage";
-import PharmacistSettings     from "./components/pages/PharmacistSettings";
+import Sidebar               from "./components/Sidebar";
+import Topbar, { Toast }     from "./components/Topbar";
+import { PharmacistSettings } from "./components/Settings";
+import Dashboard              from "./components/Dashboard";
+import MedicineStockPage      from "./components/Inventory";
+import AddMedicinePage        from "./components/AddMedicinePage";
+import RequestMedicinePage    from "./components/RequestMedicinePage";
+import DispenseMedicinePage   from "./components/DispenseMedicinePage";
 
 export default function Home() {
-  const router        = useRouter();
-  const searchParams  = useSearchParams();
+  const router       = useRouter();
+  const searchParams = useSearchParams();
 
-  const [dark, setDark]                         = useState(false);
-  const [activePage, setActivePage]             = useState("dashboard");
-  const [settingsTab, setSettingsTab]           = useState<"profile" | "password">("profile");
-  const [restockType, setRestockType]           = useState<"drugs" | "supplies" | null>(null);
-  const [showViewRequests, setShowViewRequests] = useState(false);
-  const [toast, setToast]                       = useState<{ msg: string; type: "success" | "error" } | null>(null);
-  const [medicines, setMedicines]               = useState<Medicine[]>([]);
-  const [totalCount, setTotalCount]             = useState(0);
+  const [dark, setDark]               = useState(false);
+  const [activePage, setActivePage]   = useState("dashboard");
+  const [settingsTab, setSettingsTab] = useState<"profile" | "password">("profile");
+  const [toast, setToast]             = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const [totalCount, setTotalCount]   = useState(0);
 
-  const [pharmacistName, setPharmacistName]     = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const t = dark ? DARK : LIGHT;
-
-  useEffect(() => {
-    (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const uid = session?.user?.id;
-      if (!uid) return;
-      const { data } = await supabase
-        .from("users")
-        .select("username")
-        .eq("user_id", uid)
-        .maybeSingle();
-      if (data?.username) setPharmacistName(data.username);
-    })();
-  }, []);
 
   useEffect(() => {
     const handler = (e: Event) => {
       const { medicine, qty, type } = (e as CustomEvent).detail ?? {};
       const label = medicine ? `${medicine} (${qty} ${type ?? ""})` : "item";
       showToast(`✓ Restock confirmed — ${label} added to inventory.`, "success");
+      fetchDashboardCount();
     };
     window.addEventListener("restockAutoAdded", handler);
     return () => window.removeEventListener("restockAutoAdded", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -65,6 +47,12 @@ export default function Home() {
       setSettingsTab(tab === "password" ? "password" : "profile");
     } else if (page === "medicine-stock") {
       setActivePage("stock");
+    } else if (page === "add-medicine") {
+      setActivePage("addmedicine");
+    } else if (page === "request-medicine") {
+      setActivePage("requestmedicine");
+    } else if (page === "dispensemedicine") {
+      setActivePage("dispensemedicine");
     } else if (page === "dashboard" || page === "prescriptions") {
       setActivePage("dashboard");
     }
@@ -72,24 +60,36 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const urlPage = activePage === "stock" ? "medicine-stock" : activePage;
+    const URL_PAGE_MAP: Record<string, string> = {
+      stock:            "medicine-stock",
+      addmedicine:      "add-medicine",
+      requestmedicine:  "request-medicine",
+      dispensemedicine: "dispensemedicine",
+    };
+    const urlPage = URL_PAGE_MAP[activePage] ?? activePage;
     const qs = activePage === "settings" ? `?page=settings&tab=${settingsTab}` : `?page=${urlPage}`;
     router.replace(`/pharmacist${qs}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePage, settingsTab]);
 
+  // Restock notifications from Topbar route here — RequestMedicinePage
+  // already shows full history + a per-request detail popup.
   useEffect(() => {
-    const open = () => setShowViewRequests(true);
+    const open = () => setActivePage("requestmedicine");
     window.addEventListener("openViewRequests", open);
     return () => window.removeEventListener("openViewRequests", open);
   }, []);
 
-  const handleNavigate = (page: string) => {
+  const handleNavigate = (page: string, tab?: "profile" | "password") => {
     if (page === "settings") {
       setActivePage("settings");
-      setSettingsTab("profile");
+      setSettingsTab(tab === "password" ? "password" : "profile");
     } else if (page === "medicine-stock") {
       setActivePage("stock");
+    } else if (page === "add-medicine") {
+      setActivePage("addmedicine");
+    } else if (page === "request-medicine") {
+      setActivePage("requestmedicine");
     } else if (page === "prescriptions") {
       setActivePage("dashboard");
     } else {
@@ -101,22 +101,22 @@ export default function Home() {
     setToast({ msg, type });
   }, []);
 
-  const fetchDashboardMedicines = useCallback(async () => {
+  // Dashboard reads its own aggregate stock via fetchStockSummary(); this
+  // only tracks the "Total Medicine" stat card count from the catalog table.
+  const fetchDashboardCount = useCallback(async () => {
     try {
-      const { data, error } = await supabase
+      const { count, error } = await supabase
         .from("pharma_medicines")
-        .select("*")
-        .eq("archived", false)
-        .order("created_at", { ascending: false });
+        .select("medicine_id", { count: "exact", head: true })
+        .eq("is_archived", false);
       if (error) throw error;
-      setMedicines((data as Medicine[]) ?? []);
-      setTotalCount((data as Medicine[])?.length ?? 0);
+      setTotalCount(count ?? 0);
     } catch {
-      // silently fail
+      // silently fail — dashboard just shows 0 until the next successful fetch
     }
   }, []);
 
-  useEffect(() => { fetchDashboardMedicines(); }, [fetchDashboardMedicines]);
+  useEffect(() => { fetchDashboardCount(); }, [fetchDashboardCount]);
 
   return (
     <ThemeCtx.Provider value={{ t, dark, toggle: () => setDark(d => !d) }}>
@@ -144,21 +144,22 @@ export default function Home() {
             background: t.appBg, boxSizing: "border-box", transition: "background 0.2s",
           }}>
             {activePage === "dashboard" && (
-              <Dashboard
-                medicines={medicines}
-                totalCount={totalCount}
-                onSendRequest={(type) => setRestockType(type)}
-                onOpenPrescriptions={() => setActivePage("dashboard")}
-                onViewRequests={() => setShowViewRequests(true)}
-                onStockChanged={fetchDashboardMedicines}
-              />
+              <Dashboard totalCount={totalCount} />
+            )}
+            {activePage === "addmedicine" && (
+              <AddMedicinePage onToast={showToast} />
+            )}
+            {activePage === "requestmedicine" && (
+              <RequestMedicinePage onToast={showToast} />
             )}
             {activePage === "stock" && (
               <MedicineStockPage
                 onToast={showToast}
-                onMedicineAdded={fetchDashboardMedicines}
-                darkMode={dark}
+                onMedicineAdded={fetchDashboardCount}
               />
+            )}
+            {activePage === "dispensemedicine" && (
+              <DispenseMedicinePage onToast={showToast} />
             )}
             {activePage === "settings" && (
               <PharmacistSettings initialTab={settingsTab} />
@@ -166,26 +167,6 @@ export default function Home() {
           </main>
         </div>
 
-        {pharmacistName && (
-          <RestockConfirmListener
-            pharmacistName={pharmacistName}
-            onStockAdded={fetchDashboardMedicines}
-          />
-        )}
-
-        {restockType && (
-          <RestockModal
-            requestType={restockType}
-            onClose={() => setRestockType(null)}
-            onToast={showToast}
-          />
-        )}
-        {showViewRequests && (
-          <ViewRequestsModal
-            onClose={() => setShowViewRequests(false)}
-            onToast={showToast}
-          />
-        )}
         {toast && (
           <Toast message={toast.msg} type={toast.type} onDone={() => setToast(null)} />
         )}
