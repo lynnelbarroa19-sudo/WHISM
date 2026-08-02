@@ -9,6 +9,19 @@
 // packaging breakdown. total_quantity = boxes * COALESCE(strips_per_box,0)
 // * COALESCE(pieces_per_strip,0) + loose_pieces, DB-trigger maintained,
 // same formula Warehouse uses. See align_batches_with_warehouse.sql.
+//
+// submitRestockRequest() REWRITTEN: was looping and firing one INSERT per
+// item — which meant a 5-item request produced 5 separate rows with no
+// shared id, so Warehouse's per-request notification/grouping logic (which
+// keys off request_batch_id) saw 5 unrelated requests instead of 1. Also
+// was folding dosage into medicine_name ("Paracetamol (500mg)") and type
+// into notes ("Type: Tablet — <reason>"), which broke both the warehouse
+// stock name-match and the "Reason" display (it showed "Type: Tablet"
+// instead of the actual reason). Now: one bulk insert, one shared
+// request_batch_id, and dosage/dosage_form/brand_name go into their own
+// columns — notes holds ONLY the reason. Requires the dosage / dosage_form
+// / brand_name / request_batch_id columns from the pharmacy_requests
+// migration SQL to already exist.
 "use client";
 import { supabase } from "@/lib/supabase";
 import {
@@ -159,32 +172,44 @@ export async function createMedicineWithBatch(input: {
   return medicine as Medicine;
 }
 
-/** Submit one or more items to Warehouse. Writes into `pharmacy_requests`
- *  — NOT `pharma_restock_requests`. The Warehouse module's
- *  PharmacyRequestsRecordsPage already reads/writes `pharmacy_requests`
- *  with this exact shape (see its "SCHEMA ASSUMPTION" comment); using that
- *  table here — instead of our old pharma_restock_requests, which nothing
- *  on the Warehouse side ever looked at — is what actually makes a
- *  Pharmacy request show up on their end, with zero changes needed there.
- *  Dosage/type/category get folded into `medicine_name` and `notes` since
- *  pharmacy_requests doesn't have dedicated columns for them. */
+/** Submit one or more items to Warehouse in a SINGLE insert. Writes into
+ *  `pharmacy_requests` — NOT `pharma_restock_requests`. The Warehouse
+ *  module's PharmacyRequestsRecordsPage / notification trigger already
+ *  read/write `pharmacy_requests` with this exact shape.
+ *
+ *  All items share one `request_batch_id` (either the one passed in from
+ *  the confirmation-dialog flow, or generated here if none was given) —
+ *  this is what lets Warehouse's per-statement trigger fire exactly once
+ *  for the whole request instead of once per item, and lets its "restock
+ *  request" popup group every item under a single notification.
+ *
+ *  Dosage, type (dosage_form), and brand name each get their own column
+ *  now instead of being folded into medicine_name/notes — notes holds
+ *  ONLY the reason, so it displays correctly instead of showing "Type: X". */
 export async function submitRestockRequest(
   items: RestockItem[],
   pharmacistName: string,
-  reason?: string
-) {
-  for (const item of items) {
-    const nameWithDosage = item.dosage ? `${item.medicine} (${item.dosage})` : item.medicine;
-    const noteParts = [item.type ? `Type: ${item.type}` : null, reason || null].filter(Boolean);
-    const { error } = await supabase.from("pharmacy_requests").insert([{
-      medicine_name: nameWithDosage,
-      requested_qty: item.qty,
-      unit:          item.unit || "pcs",
-      status:        "pending",
-      requested_by:  pharmacistName,
-      notes:         noteParts.length > 0 ? noteParts.join(" — ") : null,
-      category:      item.category || "drugs",
-    }]);
-    if (error) throw error;
-  }
+  reason?: string,
+  batchId?: string,
+): Promise<string> {
+  const requestBatchId = batchId ?? crypto.randomUUID();
+
+  const rows = items.map((item) => ({
+    medicine_name:    item.medicine,
+    brand_name:       item.category === "drugs" ? (item.brand || null) : null,
+    dosage:           item.category === "drugs" ? (item.dosage || null) : null,
+    dosage_form:      item.type || null,
+    requested_qty:    item.qty,
+    unit:             item.unit || "pcs",
+    status:           "pending",
+    requested_by:     pharmacistName,
+    notes:            reason || null,
+    category:         item.category || "drugs",
+    request_batch_id: requestBatchId,
+  }));
+
+  const { error } = await supabase.from("pharmacy_requests").insert(rows);
+  if (error) throw error;
+
+  return requestBatchId;
 }

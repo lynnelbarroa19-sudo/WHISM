@@ -1,25 +1,42 @@
 // RequestMedicinePage.tsx
 //
-// THIS PASS: now reads/writes `pharmacy_requests` — the table the
-// Warehouse module's PharmacyRequestsRecordsPage already expects (see that
-// file's own "SCHEMA ASSUMPTION" comment). Previously this wrote into
-// `pharma_restock_requests`, a table nothing on the Warehouse side ever
-// read — so requests never actually reached them. No changes needed on
-// the Warehouse side; this just targets the table they were already built
-// against.
+// Reads/writes `pharmacy_requests` — the table Warehouse's
+// PharmacyRequestsRecordsPage reads from.
 //
-// Column/status shape is Warehouse's, not ours:
-//   id, medicine_name, requested_qty, unit, status, requested_by,
-//   requested_at, notes, fulfilled_at
-//   status: 'pending' | 'approved' | 'rejected' | 'fulfilled'
-// (no separate dosage/type/category columns — those get folded into
-// medicine_name / notes when submitting, same as submitRestockRequest()
-// in pharmacyData.ts does.)
+// Status vocabulary now matches Warehouse's current version:
+//   'pending' | 'confirm' | 'alerted' | 'rejected' | 'received'
+// (previously 'pending' | 'approved' | 'rejected' | 'fulfilled')
+//
+// Multi-item submissions now share one `request_batch_id` (generated once
+// per submission in submitRestockRequest()), so Warehouse can show them as
+// a single grouped popup instead of separate notifications. History
+// grouping here uses that same id when present, falling back to the old
+// same-minute heuristic only for legacy rows submitted before this change.
+//
+// `dosage` and `dosage_form` ("Type") are their own columns instead of
+// being folded into medicine_name/notes — the New Request form already
+// collects them separately, so this just stops throwing that detail away.
+//
+// UPDATED: fields now depend on the item's category.
+//   - Drugs:    Generic Name, Brand Name (optional), Dosage, Type, Unit, Qty
+//   - Supplies: Name, Type, Unit, Qty
+//   (Requested By and Reason stay as request-level fields, shared by all
+//   items in the request — that hasn't changed.)
+//
+// NOTE: this file assumes two small companion changes elsewhere, since
+// this page can't add columns/params on its own:
+//   1) `../lib/pharmacy` — RestockItem (or whatever local shape is passed
+//      to submitRestockRequest) needs an optional `brand` field alongside
+//      `medicine`/`dosage`/`type`/`unit`/`qty`/`category`.
+//   2) `../lib/pharmacyData` — submitRestockRequest() needs to insert the
+//      new `brand_name` column (drugs only — leave null for supplies),
+//      alongside the existing medicine_name/dosage/dosage_form insert.
+//   See the accompanying SQL for the new `brand_name` column.
 "use client";
 import { CSSProperties, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
-  useTheme, RestockItem,
+  useTheme,
   MEDICINE_TYPES, SUPPLY_TYPES, UNITS,
 } from "../lib/pharmacy";
 import { submitRestockRequest } from "../lib/pharmacyData";
@@ -31,14 +48,15 @@ type Props = {
 
 const DARK_GREEN = "#14532d";
 type ItemCategory = "drugs" | "supplies";
-type RequestStatus = "pending" | "approved" | "rejected" | "fulfilled";
+type RequestStatus = "pending" | "confirm" | "alerted" | "rejected" | "received";
 type StatusFilter = "all" | RequestStatus;
 
 const STATUS_MAP: Record<RequestStatus, { bg: string; color: string; border: string; label: string }> = {
-  pending:   { bg: "#fef9c3", color: "#854d0e", border: "#fde047", label: "Pending" },
-  approved:  { bg: "#dbeafe", color: "#1d4ed8", border: "#93c5fd", label: "Approved" },
-  fulfilled: { bg: "#dcfce7", color: "#166534", border: "#86efac", label: "Fulfilled" },
-  rejected:  { bg: "#fee2e2", color: "#991b1b", border: "#fca5a5", label: "Rejected" },
+  pending:  { bg: "#fef9c3", color: "#854d0e", border: "#fde047", label: "Pending"   },
+  confirm:  { bg: "#dbeafe", color: "#1d4ed8", border: "#93c5fd", label: "Confirmed" },
+  alerted:  { bg: "#fef3c7", color: "#92400e", border: "#fcd34d", label: "Alerted"   },
+  rejected: { bg: "#fee2e2", color: "#991b1b", border: "#fca5a5", label: "Rejected"  },
+  received: { bg: "#dcfce7", color: "#166534", border: "#86efac", label: "Received"  },
 };
 
 function StatusPill({ status }: { status: RequestStatus }) {
@@ -51,10 +69,16 @@ function StatusPill({ status }: { status: RequestStatus }) {
   );
 }
 
-/** One row from pharmacy_requests, matching Warehouse's exact shape. */
+/** One row from pharmacy_requests, matching Warehouse's exact shape.
+ *  `medicine_name` doubles as "Generic Name" for drugs and "Name" for
+ *  supplies; `brand_name` is drugs-only and null for supplies. */
 type PharmacyRequestRow = {
   id: string;
   medicine_name: string;
+  brand_name: string | null;
+  dosage: string | null;
+  dosage_form: string | null;
+  category: ItemCategory;
   requested_qty: number;
   unit: string;
   status: RequestStatus;
@@ -62,12 +86,27 @@ type PharmacyRequestRow = {
   requested_at: string;
   notes: string | null;
   fulfilled_at: string | null;
+  fulfilled_qty: number | null;
+  request_batch_id: string | null;
 };
 
-/** Groups individual pharmacy_requests rows sent in the same minute by the
- *  same requester into one "session" — a multi-item New Request submits
- *  one row per item, so this is what makes them show as a single batch in
- *  the history table, same convention used elsewhere in the app. */
+/** Draft/list-item shape used only inside the New Request form.
+ *  `brand` is only meaningful (and only shown) for drugs; it's carried
+ *  along as an empty string for supplies and ignored on submit. */
+type ItemDraft = {
+  medicine: string; // Generic Name (drugs) / Name (supplies)
+  brand: string;    // Brand Name — drugs only
+  dosage: string;   // Dosage — drugs only
+  type: string;     // Type — both, different option lists
+  unit: string;
+  qty: number;
+  category: ItemCategory;
+};
+
+/** Groups pharmacy_requests rows into one "session" per submission.
+ *  Prefers the explicit request_batch_id (set by submitRestockRequest for
+ *  every item sent together); falls back to the old same-minute-by-same-
+ *  requester heuristic only for rows submitted before batch_id existed. */
 type RequestBatch = {
   key: string;
   requested_by: string;
@@ -77,15 +116,19 @@ type RequestBatch = {
 };
 
 function batchStatus(items: PharmacyRequestRow[]): RequestStatus {
-  const counts: Record<RequestStatus, number> = { pending: 0, approved: 0, fulfilled: 0, rejected: 0 };
+  const counts: Record<RequestStatus, number> = { pending: 0, confirm: 0, alerted: 0, rejected: 0, received: 0 };
   for (const i of items) counts[i.status] = (counts[i.status] ?? 0) + 1;
-  if (counts.pending === items.length) return "pending";
-  if (counts.fulfilled === items.length) return "fulfilled";
-  if (counts.rejected === items.length) return "rejected";
-  if (counts.approved === items.length) return "approved";
+  const n = items.length;
+  if (counts.pending === n) return "pending";
+  if (counts.received === n) return "received";
+  if (counts.rejected === n) return "rejected";
+  if (counts.confirm === n) return "confirm";
+  if (counts.alerted === n) return "alerted";
+  // Mixed batch — surface whichever still needs attention first.
   if (counts.pending > 0) return "pending";
-  if (counts.approved > 0) return "approved";
-  if (counts.fulfilled > 0) return "fulfilled";
+  if (counts.alerted > 0) return "alerted";
+  if (counts.confirm > 0) return "confirm";
+  if (counts.received > 0) return "received";
   return "rejected";
 }
 
@@ -96,7 +139,7 @@ function fmtTime(iso: string) {
   return new Date(iso).toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" });
 }
 
-const EMPTY_DRAFT: RestockItem = { medicine: "", dosage: "", type: "", unit: "Pieces", qty: 1, category: "drugs" };
+const EMPTY_DRAFT: ItemDraft = { medicine: "", brand: "", dosage: "", type: "", unit: "Pieces", qty: 1, category: "drugs" };
 
 export default function RequestMedicinePage({ onToast }: Props) {
   const { t } = useTheme();
@@ -107,8 +150,12 @@ export default function RequestMedicinePage({ onToast }: Props) {
 
   const [showNewRequest, setShowNewRequest] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
-  const [items, setItems] = useState<RestockItem[]>([]);
-  const [draft, setDraft] = useState<RestockItem>(EMPTY_DRAFT);
+  // Set the moment "SEND REQUEST" is clicked (after validation passes) —
+  // holds the request id that will be used for this submission, so the
+  // confirmation dialog shows the exact id that ends up in the database.
+  const [pendingRequestId, setPendingRequestId] = useState<string | null>(null);
+  const [items, setItems] = useState<ItemDraft[]>([]);
+  const [draft, setDraft] = useState<ItemDraft>(EMPTY_DRAFT);
   const [itemCategory, setItemCategory] = useState<ItemCategory>("drugs");
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
@@ -136,14 +183,16 @@ export default function RequestMedicinePage({ onToast }: Props) {
     try {
       const { data, error } = await supabase
         .from("pharmacy_requests")
-        .select("id, medicine_name, requested_qty, unit, status, requested_by, requested_at, notes, fulfilled_at")
+        .select("id, medicine_name, brand_name, dosage, dosage_form, category, requested_qty, unit, status, requested_by, requested_at, notes, fulfilled_at, fulfilled_qty, request_batch_id")
         .order("requested_at", { ascending: false });
       if (error) throw error;
 
       const rows = (data ?? []) as PharmacyRequestRow[];
       const map = new Map<string, RequestBatch>();
       for (const r of rows) {
-        const key = `${r.requested_by}__${r.requested_at.slice(0, 16)}`; // groups items sent in the same minute
+        // Prefer the real batch id; only fall back to the minute-heuristic
+        // for legacy rows that predate request_batch_id.
+        const key = r.request_batch_id ?? `${r.requested_by}__${r.requested_at.slice(0, 16)}`;
         if (!map.has(key)) {
           map.set(key, { key, requested_by: r.requested_by, requested_at: r.requested_at, items: [], status: "pending" });
         }
@@ -162,8 +211,8 @@ export default function RequestMedicinePage({ onToast }: Props) {
 
   useEffect(() => { loadHistory(); }, []);
 
-  // Realtime — Warehouse approving/rejecting/fulfilling shows up here live,
-  // no manual refresh needed.
+  // Realtime — Warehouse confirming/alerting/rejecting/receiving shows up
+  // here live, no manual refresh needed.
   useEffect(() => {
     const channel = supabase
       .channel("pharmacy_requests_pharmacist_view")
@@ -174,7 +223,7 @@ export default function RequestMedicinePage({ onToast }: Props) {
     return () => { supabase.removeChannel(channel); };
   }, []);
 
-  const set = (k: keyof RestockItem, v: string | number) => setDraft(d => ({ ...d, [k]: v }));
+  const set = (k: keyof ItemDraft, v: string | number) => setDraft(d => ({ ...d, [k]: v }));
 
   /** Clamps to a positive integer — typing "-", "0", or letters can't sneak through. */
   const setQty = (raw: string) => {
@@ -182,18 +231,29 @@ export default function RequestMedicinePage({ onToast }: Props) {
     set("qty", !Number.isFinite(n) || n < 1 ? 1 : n);
   };
 
-  /** Switching category clears the Type field so a stale drug type can't
-   *  linger while browsing the supplies list, or vice versa. */
+  /** Switching category clears the fields that don't apply to the new
+   *  category — brand/dosage are drugs-only, so a stale value can't sneak
+   *  into a supplies row (or vice versa) just by flipping the toggle. */
   const switchCategory = (cat: ItemCategory) => {
     setItemCategory(cat);
-    set("type", "");
+    setDraft(d => ({ ...d, type: "", brand: "", dosage: "" }));
   };
 
   const addItem = () => {
-    if (!draft.medicine.trim()) { onToast("Enter a medicine or supply name first.", "error"); return; }
+    if (!draft.medicine.trim()) {
+      onToast(itemCategory === "drugs" ? "Enter a generic name first." : "Enter a supply name first.", "error");
+      return;
+    }
     if (!draft.qty || draft.qty < 1) { onToast("Quantity must be at least 1.", "error"); return; }
-    setItems(prev => [...prev, { ...draft, category: itemCategory, qty: Math.max(1, Math.floor(draft.qty)) }]);
-    setDraft(EMPTY_DRAFT);
+    setItems(prev => [...prev, {
+      ...draft,
+      category: itemCategory,
+      qty: Math.max(1, Math.floor(draft.qty)),
+      // Belt-and-suspenders: strip drugs-only fields if somehow present on a supplies row.
+      brand: itemCategory === "drugs" ? draft.brand : "",
+      dosage: itemCategory === "drugs" ? draft.dosage : "",
+    }]);
+    setDraft({ ...EMPTY_DRAFT, category: itemCategory, unit: draft.unit });
   };
   const removeItem = (i: number) => setItems(prev => prev.filter((_, idx) => idx !== i));
 
@@ -219,14 +279,33 @@ export default function RequestMedicinePage({ onToast }: Props) {
     setShowNewRequest(false);
   };
 
-  const handleSend = async () => {
+  /** "SEND REQUEST" no longer sends right away — it validates, generates
+   *  the id this submission will use, and opens a confirmation dialog so
+   *  the pharmacist can review everything (and see the request id) before
+   *  it actually goes out. */
+  const openSendConfirmation = () => {
     if (items.length === 0) { onToast("Add at least one item to the request.", "error"); return; }
     if (!requesterName.trim()) { onToast("Enter the requester's name.", "error"); return; }
+    setPendingRequestId(crypto.randomUUID());
+  };
+
+  /** Actual submission — only reachable from the confirmation dialog's
+   *  "Confirm & Send" button. */
+  const handleSend = async () => {
+    if (!pendingRequestId) return;
     setSaving(true);
     try {
-      await submitRestockRequest(items, requesterName.trim(), reason.trim() || undefined);
+      // submitRestockRequest() needs a matching update to:
+      //   1) accept this pre-generated batchId and use it as-is instead of
+      //      generating its own, so the id shown in the confirmation dialog
+      //      matches what actually lands in request_batch_id; and
+      //   2) write `brand` into the new brand_name column (drugs only —
+      //      pass null/undefined for supplies rows).
+      // See lib/pharmacyData.ts.
+      await submitRestockRequest(items, requesterName.trim(), reason.trim() || undefined, pendingRequestId);
       onToast(`Request sent to Warehouse (${items.length} item${items.length > 1 ? "s" : ""}).`, "success");
       resetForm();
+      setPendingRequestId(null);
       setShowNewRequest(false);
       loadHistory();
     } catch (err: any) {
@@ -257,13 +336,17 @@ export default function RequestMedicinePage({ onToast }: Props) {
     padding: "12px 16px", fontSize: 12.5, color: t.text2, verticalAlign: "middle",
   };
 
-  const typeOptions = itemCategory === "drugs" ? MEDICINE_TYPES : SUPPLY_TYPES;
+  const isDrugs = itemCategory === "drugs";
+  const typeOptions = isDrugs ? MEDICINE_TYPES : SUPPLY_TYPES;
 
   const filteredBatches = batches.filter(b => {
     if (statusFilter !== "all" && b.status !== statusFilter) return false;
     if (search.trim()) {
       const q = search.trim().toLowerCase();
-      const matchesItem = b.items.some(it => it.medicine_name.toLowerCase().includes(q));
+      const matchesItem = b.items.some(it =>
+        it.medicine_name.toLowerCase().includes(q) ||
+        (it.brand_name ?? "").toLowerCase().includes(q)
+      );
       const matchesRequester = b.requested_by.toLowerCase().includes(q);
       if (!matchesItem && !matchesRequester) return false;
     }
@@ -311,7 +394,7 @@ export default function RequestMedicinePage({ onToast }: Props) {
           </span>
           <input
             value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Search item or requester..."
+            placeholder="Search item, brand, or requester..."
             style={{
               width: "100%", boxSizing: "border-box", padding: "9px 34px 9px 32px",
               borderRadius: 8, border: `1.5px solid ${t.inputBorder}`, fontSize: 12.5,
@@ -332,9 +415,10 @@ export default function RequestMedicinePage({ onToast }: Props) {
         }}>
           <option value="all">All Status</option>
           <option value="pending">Pending</option>
-          <option value="approved">Approved</option>
-          <option value="fulfilled">Fulfilled</option>
+          <option value="confirm">Confirmed</option>
+          <option value="alerted">Alerted</option>
           <option value="rejected">Rejected</option>
+          <option value="received">Received</option>
         </select>
 
         {activeFilterCount > 0 && (
@@ -383,7 +467,7 @@ export default function RequestMedicinePage({ onToast }: Props) {
                   <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                     {b.items.slice(0, 5).map(it => (
                       <span key={it.id} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {it.medicine_name}
+                        {it.medicine_name}{it.brand_name ? ` (${it.brand_name})` : ""}
                       </span>
                     ))}
                     {b.items.length > 5 && (
@@ -413,7 +497,7 @@ export default function RequestMedicinePage({ onToast }: Props) {
           <div
             onClick={e => e.stopPropagation()}
             style={{
-              background: t.cardBg, borderRadius: 16, width: "100%", maxWidth: 640,
+              background: t.cardBg, borderRadius: 16, width: "100%", maxWidth: 780,
               maxHeight: "84vh", overflow: "hidden", display: "flex", flexDirection: "column",
               boxShadow: "0 24px 60px rgba(0,0,0,0.35)", border: `2px solid ${DARK_GREEN}`,
             }}
@@ -444,7 +528,10 @@ export default function RequestMedicinePage({ onToast }: Props) {
                 <thead>
                   <tr>
                     <th style={{ ...thStyle, width: 28 }}>#</th>
-                    <th style={thStyle}>Item</th>
+                    <th style={thStyle}>Generic Name / Name</th>
+                    <th style={thStyle}>Brand</th>
+                    <th style={thStyle}>Dosage</th>
+                    <th style={thStyle}>Type</th>
                     <th style={{ ...thStyle, textAlign: "right" }}>Qty</th>
                     <th style={thStyle}>Notes</th>
                     <th style={{ ...thStyle, textAlign: "center" }}>Status</th>
@@ -455,7 +542,14 @@ export default function RequestMedicinePage({ onToast }: Props) {
                     <tr key={it.id} style={{ borderTop: `1px solid ${t.border2}` }}>
                       <td style={{ ...tdStyle, color: t.text3, fontSize: 11 }}>{i + 1}</td>
                       <td style={{ ...tdStyle, fontWeight: 700, color: t.text }}>{it.medicine_name}</td>
-                      <td style={{ ...tdStyle, textAlign: "right", fontWeight: 700 }}>{it.requested_qty} {it.unit}</td>
+                      <td style={{ ...tdStyle, fontSize: 11.5 }}>{it.category === "drugs" ? (it.brand_name || "—") : "—"}</td>
+                      <td style={{ ...tdStyle, fontSize: 11.5 }}>{it.category === "drugs" ? (it.dosage || "—") : "—"}</td>
+                      <td style={{ ...tdStyle, fontSize: 11.5 }}>{it.dosage_form || "—"}</td>
+                      <td style={{ ...tdStyle, textAlign: "right", fontWeight: 700 }}>
+                        {it.status === "received" && it.fulfilled_qty != null && it.fulfilled_qty < it.requested_qty
+                          ? `${it.fulfilled_qty}/${it.requested_qty} ${it.unit}`
+                          : `${it.requested_qty} ${it.unit}`}
+                      </td>
                       <td style={{ ...tdStyle, fontSize: 11.5 }}>{it.notes || "—"}</td>
                       <td style={{ ...tdStyle, textAlign: "center" }}><StatusPill status={it.status} /></td>
                     </tr>
@@ -524,28 +618,38 @@ export default function RequestMedicinePage({ onToast }: Props) {
 
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 <div>
-                  <label style={lbl}>{itemCategory === "drugs" ? "Medicine Name" : "Supply Name"}</label>
-                  <input value={draft.medicine} onChange={e => set("medicine", e.target.value)} placeholder={itemCategory === "drugs" ? "e.g. Paracetamol" : "e.g. Face Mask"} style={inp} />
+                  <label style={lbl}>{isDrugs ? "Generic Name" : "Supply Name"}</label>
+                  <input value={draft.medicine} onChange={e => set("medicine", e.target.value)} placeholder={isDrugs ? "e.g. Paracetamol" : "e.g. Face Mask"} style={inp} />
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  <div>
-                    <label style={lbl}>Dosage / Spec</label>
-                    <input value={draft.dosage} onChange={e => set("dosage", e.target.value)} placeholder={itemCategory === "drugs" ? "500mg" : "Optional"} style={inp} />
+
+                {/* Drugs-only: Brand Name + Dosage. Supplies skip straight to Type/Unit/Qty. */}
+                {isDrugs && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    <div>
+                      <label style={lbl}>Brand Name (optional)</label>
+                      <input value={draft.brand} onChange={e => set("brand", e.target.value)} placeholder="e.g. Biogesic" style={inp} />
+                    </div>
+                    <div>
+                      <label style={lbl}>Dosage</label>
+                      <input value={draft.dosage} onChange={e => set("dosage", e.target.value)} placeholder="500mg" style={inp} />
+                    </div>
                   </div>
-                  <div>
-                    <label style={lbl}>Type</label>
-                    <input
-                      list="request-medicine-type-options"
-                      value={draft.type}
-                      onChange={e => set("type", e.target.value)}
-                      placeholder="Search or type a type…"
-                      style={inp}
-                    />
-                    <datalist id="request-medicine-type-options">
-                      {typeOptions.map(o => <option key={o} value={o} />)}
-                    </datalist>
-                  </div>
+                )}
+
+                <div>
+                  <label style={lbl}>Type</label>
+                  <input
+                    list="request-medicine-type-options"
+                    value={draft.type}
+                    onChange={e => set("type", e.target.value)}
+                    placeholder="Search or type a type…"
+                    style={inp}
+                  />
+                  <datalist id="request-medicine-type-options">
+                    {typeOptions.map(o => <option key={o} value={o} />)}
+                  </datalist>
                 </div>
+
                 {/* Quantity — same adaptive idea as Add Medicine: the unit
                     chosen drives the label, so "5" always reads unambiguously
                     as "5 Boxes" / "5 Bottles" / etc, not a bare number. */}
@@ -586,8 +690,12 @@ export default function RequestMedicinePage({ onToast }: Props) {
                       borderBottom: i < items.length - 1 ? `1px solid ${t.border2}` : "none",
                     }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 12.5, fontWeight: 700, color: t.text }}>{item.medicine}</div>
-                        <div style={{ fontSize: 11, color: t.text3 }}>{item.dosage || "—"} · {item.type || "—"}</div>
+                        <div style={{ fontSize: 12.5, fontWeight: 700, color: t.text }}>
+                          {item.medicine}{item.category === "drugs" && item.brand ? ` (${item.brand})` : ""}
+                        </div>
+                        <div style={{ fontSize: 11, color: t.text3 }}>
+                          {item.category === "drugs" ? `${item.dosage || "—"} · ` : ""}{item.type || "—"}
+                        </div>
                       </div>
                       <div style={{ fontSize: 13, fontWeight: 800, color: t.green }}>{item.qty} {item.unit}</div>
                       <button onClick={() => removeItem(i)} style={{ border: "none", background: "none", color: "#d63031", fontSize: 16, cursor: "pointer", padding: 0 }}>×</button>
@@ -605,13 +713,97 @@ export default function RequestMedicinePage({ onToast }: Props) {
             </div>
 
             <div style={{ padding: 18, borderTop: `1px solid ${t.border2}`, flexShrink: 0 }}>
-              <button onClick={handleSend} disabled={saving} style={{
+              <button onClick={openSendConfirmation} disabled={saving} style={{
                 width: "100%", padding: "13px 0", borderRadius: 10, border: "none",
                 background: t.green, color: "#fff", fontSize: 14, fontWeight: 900, cursor: "pointer",
                 fontFamily: "inherit", boxShadow: `0 6px 18px ${t.green}44`, opacity: saving ? 0.6 : 1,
               }}>
                 {saving ? "SENDING…" : "SEND REQUEST"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Send confirmation dialog — final review before the request
+          actually goes out. Backdrop click does nothing on purpose (same
+          reasoning as the New Request modal: no accidental loss), only
+          the two explicit buttons resolve it. ── */}
+      {pendingRequestId && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: t.cardBg, borderRadius: 16, width: "100%", maxWidth: 460,
+              maxHeight: "86vh", display: "flex", flexDirection: "column", overflow: "hidden",
+              boxShadow: "0 24px 60px rgba(0,0,0,0.4)", border: `2px solid ${DARK_GREEN}`,
+            }}
+          >
+            <div style={{
+              background: `linear-gradient(135deg, ${DARK_GREEN}, #16a34a)`, padding: "16px 22px", flexShrink: 0,
+            }}>
+              <div style={{ color: "#fff", fontSize: 15, fontWeight: 900 }}>Confirm Request</div>
+              <div style={{ color: "rgba(255,255,255,0.85)", fontSize: 11.5, marginTop: 2 }}>
+                Please review before sending to Warehouse.
+              </div>
+            </div>
+
+            <div style={{ flex: 1, overflowY: "auto", padding: "18px 22px" }}>
+              <div style={{ marginBottom: 14 }}>
+                <label style={lbl}>Request ID</label>
+                <div style={{
+                  fontFamily: "monospace", fontSize: 12.5, fontWeight: 700, color: t.text,
+                  background: `${t.green}12`, border: `1px solid ${t.border2}`, borderRadius: 8,
+                  padding: "8px 10px", wordBreak: "break-all",
+                }}>{pendingRequestId}</div>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={lbl}>Requested By</label>
+                <div style={{ fontSize: 13, fontWeight: 700, color: t.text }}>{requesterName.trim()}</div>
+              </div>
+
+              <label style={lbl}>Items ({items.length})</label>
+              <div style={{ border: `1px solid ${t.border2}`, borderRadius: 10, overflow: "hidden", marginBottom: 14 }}>
+                {items.map((item, i) => (
+                  <div key={i} style={{
+                    display: "flex", alignItems: "center", gap: 12, padding: "10px 14px",
+                    borderBottom: i < items.length - 1 ? `1px solid ${t.border2}` : "none",
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 700, color: t.text }}>
+                        {item.medicine}{item.category === "drugs" && item.brand ? ` (${item.brand})` : ""}
+                      </div>
+                      <div style={{ fontSize: 11, color: t.text3 }}>
+                        {item.category === "drugs" ? `${item.dosage || "—"} · ` : ""}{item.type || "—"}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: t.green, whiteSpace: "nowrap" }}>{item.qty} {item.unit}</div>
+                  </div>
+                ))}
+              </div>
+
+              {reason.trim() && (
+                <div>
+                  <label style={lbl}>Reason</label>
+                  <div style={{ fontSize: 12.5, color: t.text2, lineHeight: 1.5 }}>{reason.trim()}</div>
+                </div>
+              )}
+            </div>
+
+            <div style={{ padding: 18, borderTop: `1px solid ${t.border2}`, flexShrink: 0, display: "flex", gap: 10 }}>
+              <button onClick={() => setPendingRequestId(null)} disabled={saving} style={{
+                flex: 1, padding: "12px 0", borderRadius: 10, border: `1.5px solid ${t.border2}`,
+                background: "transparent", color: t.text2, fontSize: 13, fontWeight: 800, cursor: "pointer",
+                fontFamily: "inherit", opacity: saving ? 0.6 : 1,
+              }}>Back</button>
+              <button onClick={handleSend} disabled={saving} style={{
+                flex: 1.4, padding: "12px 0", borderRadius: 10, border: "none",
+                background: t.green, color: "#fff", fontSize: 13, fontWeight: 900, cursor: "pointer",
+                fontFamily: "inherit", boxShadow: `0 6px 18px ${t.green}44`, opacity: saving ? 0.6 : 1,
+              }}>{saving ? "SENDING…" : "Confirm & Send"}</button>
             </div>
           </div>
         </div>

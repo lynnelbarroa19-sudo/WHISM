@@ -7,7 +7,6 @@ import Topbar from '../components/Topbar'
 import StatsCards from '../components/StatsCard'
 import StockLevelCard from '../components/StockLevelCard'
 import DispensedMedicineCard from '../components/DispensedMedicineCard'
-import PharmacyRequestsCard from '../components/Pharmacyrequestcard'
 import DispenseMedicineModal from '../components/DispenseMedicineModal'
 import MedicineMovementAnalytics from '../components/MedicineMovementAnalytics'
 import styles from '../components/warehouse.module.css'
@@ -87,18 +86,17 @@ function DashboardInner() {
             height: topbarHeight ? `calc(100vh - ${topbarHeight}px)` : '100vh',
             overflow: 'hidden',
             display: 'flex',
-            gap: 20,
             alignItems: 'stretch',
             padding: '20px',
             boxSizing: 'border-box',
           }}
         >
 
-          {/* LEFT column — header + buong grid. Ito lang ang may internal scroll. */}
+          {/* Buong page ngayon — Pharmacy Requests card ay inalis na dito,
+              nasa sarili na itong "Requests" page (Sidebar nav item). */}
           <div
             style={{
               flex: 1,
-              minWidth: 760,
               height: '100%',
               overflowY: 'auto',
               overflowX: 'hidden',
@@ -147,18 +145,6 @@ function DashboardInner() {
                 <DispensedMedicineCard key={`dispensed-${refreshKey}`} />
               </div>
             </div>
-          </div>
-
-          {/* RIGHT column — Pharmacy Requests, tulad ng dati. */}
-          <div
-            style={{
-              width: 360,
-              flexShrink: 0,
-              height: '100%',
-              overflow: 'hidden',
-            }}
-          >
-            <PharmacyRequestsCard />
           </div>
 
         </div>
