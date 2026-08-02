@@ -1,22 +1,34 @@
 'use client'
-import { useState, useEffect, useRef, CSSProperties } from 'react'
+import { useState, useEffect, useRef, useMemo, CSSProperties } from 'react'
 import { useRouter } from 'next/navigation'
 import { useTheme } from 'next-themes'
-import { Bell, Moon, Sun, Search, X, User, Lock, LogOut, ChevronDown } from 'lucide-react'
-import { Doughnut } from 'react-chartjs-2'
-import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js'
+import { Bell, Moon, Sun, User, Lock, LogOut, ChevronDown } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import styles from './warehouse.module.css'
+// Adjust this path if RequestBatchModal actually lives somewhere else
+// relative to Topbar.
+import RequestBatchModal from './RequestBatchModal'
 
-ChartJS.register(ArcElement, Tooltip, Legend)
+// Route where the moved-out pharmacy requests page now lives.
+// Adjust this if your actual folder/route is named differently.
+const REQUESTS_ROUTE = '/warehouse/requests'
 
-interface RestockRequest {
-  id: number
-  pharmacist_name: string
-  medicine_name: string
-  dosage: string
-  medicine_type: string
-  quantity: number
+const NOTIF_TABLE = 'notifications'
+const MY_ROLE = 'warehouse'
+
+type NotifType = 'new_request' | 'request_approved' | 'request_rejected' | 'request_confirmed' | 'request_short'
+
+interface AppNotification {
+  id: string
+  recipient_role: 'admin' | 'pharmacist' | 'warehouse'
+  type: NotifType
+  title: string
+  message: string
+  related_request_id: string | null
+  // Set for batched submissions (2+ items sent together) — a single
+  // notification now covers the whole batch instead of one per item.
+  related_batch_id: string | null
+  is_read: boolean
   created_at: string
 }
 
@@ -31,13 +43,6 @@ interface Medicine {
 }
 
 interface ExpiringAlert extends Medicine { daysLeft: number }
-
-const stockData = {
-  Highest: { labels: ['Paracetamol','Amoxicillin','Vitamin C'], data: [120,95,80], colors: ['#16a34a','#2d9e4f','#4ade80'] },
-  Medium:  { labels: ['Ibuprofen','Mefenamic','Cetirizine'],   data: [55,45,40],   colors: ['#f59e0b','#fbbf24','#fcd34d'] },
-  Lowest:  { labels: ['Insulin','Metformin','Losartan'],        data: [10,8,5],     colors: ['#ef4444','#f56565','#fc8181'] },
-}
-type FilterType = 'Highest' | 'Medium' | 'Lowest'
 
 const LOW_STOCK_MAX = 30
 
@@ -56,6 +61,37 @@ function getStoredUserId(): string | null {
   return null
 }
 
+function timeAgo(iso: string) {
+  const diffMs = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diffMs / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  return `${days}d ago`
+}
+
+/** Small per-type badge shown next to a DB notification's title. */
+function notifBadge(type: NotifType): { label: string; bg: string; color: string } | null {
+  switch (type) {
+    case 'new_request':       return { label: 'New',      bg: '#fee2e2', color: '#dc2626' }
+    case 'request_short':     return { label: 'Short',    bg: '#fef9c3', color: '#ca8a04' }
+    case 'request_confirmed': return { label: 'Fulfilled',bg: '#dcfce7', color: '#16a34a' }
+    case 'request_approved':  return { label: 'Approved', bg: '#dbeafe', color: '#2563eb' }
+    case 'request_rejected':  return { label: 'Rejected', bg: '#fee2e2', color: '#dc2626' }
+    default: return null
+  }
+}
+
+/** Key used to group notification rows that belong to the same request —
+ *  prefers the batch id (multi-item submissions); falls back to the single
+ *  request id for legacy/one-item requests that predate batching; and
+ *  finally the notification's own id so anything unrelated never collapses. */
+function groupKey(n: AppNotification): string {
+  return n.related_batch_id || n.related_request_id || n.id
+}
+
 const profileMenuItemStyle: CSSProperties = {
   width: '100%', padding: '11px 16px', textAlign: 'left',
   border: 'none', background: 'transparent', cursor: 'pointer',
@@ -71,10 +107,10 @@ export default function Topbar() {
   const [mounted, setMounted] = useState(false)
 
   const [showNotif, setShowNotif] = useState(false)
-  const [selectedRequest, setSelectedRequest] = useState<RestockRequest | null>(null)
   const [selectedAlert, setSelectedAlert] = useState<ExpiringAlert | null>(null)
-  const [stockFilter, setStockFilter] = useState<FilterType>('Highest')
-  const [notifSearch, setNotifSearch] = useState('')
+  // Set when a restock-request notification (new_request / request_short /
+  // etc.) is clicked — drives the RequestBatchModal popup.
+  const [openRequestNotif, setOpenRequestNotif] = useState<AppNotification | null>(null)
   const [toast, setToast] = useState('')
   const [toastType, setToastType] = useState<'alert' | 'confirm'>('confirm')
   const [showProfile, setShowProfile] = useState(false)
@@ -98,11 +134,15 @@ export default function Topbar() {
     typeof window !== 'undefined' ? localStorage.getItem('userAvatar') : null
   )
 
-  const [requests, setRequests] = useState<RestockRequest[]>([])
+  // Pharmacy-request notifications (persistent, DB-backed)
+  const [notifications, setNotifications] = useState<AppNotification[]>([])
+
+  // Warehouse-stock alerts (expiring / low stock) — unchanged from before
   const [expiringAlerts, setExpiringAlerts] = useState<ExpiringAlert[]>([])
   const [lowStockAlerts, setLowStockAlerts] = useState<Medicine[]>([])
   const [readIds, setReadIds] = useState<Set<string>>(new Set())
   const [notifTab, setNotifTab] = useState<'new' | 'read'>('new')
+
   const [showAddModal, setShowAddModal] = useState(false)
   const [addForm, setAddForm] = useState({
     name: '', dosage: '', type: '', expDate: '', quantity: '', unit: ''
@@ -123,10 +163,9 @@ export default function Topbar() {
       .from('users')
       .select('username, email, avatar_url, role')
       .eq('user_id', uid)
-      .maybeSingle() // ← was .single(); maybeSingle() returns null instead of throwing when 0 rows match
+      .maybeSingle()
 
     if (error) {
-      // Log actual error fields — PostgrestError doesn't always spread cleanly in the console
       console.error('[Topbar] fetchProfile error:', {
         message: error.message,
         code: error.code,
@@ -154,58 +193,23 @@ export default function Topbar() {
     if (data.avatar_url) setUserAvatar(`${data.avatar_url}?t=${Date.now()}`)
   }
 
-  useEffect(() => {
-    setMounted(true)
-    fetchRequests()
-    fetchAlerts()
-    fetchProfile()
-
-    const storedRead = localStorage.getItem('smartrhu_read_notifs')
-    if (storedRead) {
-      try { setReadIds(new Set(JSON.parse(storedRead))) } catch {}
-    }
-
-    window.addEventListener('profileUpdated', fetchProfile)
-    window.addEventListener('avatarUpdated', fetchProfile)
-    return () => {
-      window.removeEventListener('profileUpdated', fetchProfile)
-      window.removeEventListener('avatarUpdated', fetchProfile)
-    }
-  }, [])
-
-  // ── Close profile dropdown on outside click ──
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (profileRef.current && !profileRef.current.contains(e.target as Node)) setShowProfile(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [])
-
-  // ── Clock ──
-  useEffect(() => {
-    const tick = () => setTime(
-      new Date().toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    )
-    tick()
-    const id = setInterval(tick, 1000)
-    return () => clearInterval(id)
-  }, [])
-
-  const fetchRequests = async () => {
-    const { data } = await supabase
-      .from('restock_requests')
+  const fetchNotifications = async () => {
+    const { data, error } = await supabase
+      .from(NOTIF_TABLE)
       .select('*')
-      .eq('status', 'pending')
+      .eq('recipient_role', MY_ROLE)
       .order('created_at', { ascending: false })
-    setRequests(data || [])
+      .limit(30)
+
+    if (error) {
+      console.error('[Topbar] fetchNotifications error:', error)
+      return
+    }
+    if (data) setNotifications(data as AppNotification[])
   }
 
   const fetchAlerts = async () => {
     const today = new Date()
-    const in30 = new Date()
-    in30.setDate(in30.getDate() + 30)
-
     const { data } = await supabase
       .from('warehouse_medicines')
       .select('id, med_name, med_dosage, med_type, exp_date, quantity, unit')
@@ -236,12 +240,68 @@ export default function Topbar() {
     }
   }
 
+  useEffect(() => {
+    setMounted(true)
+    fetchNotifications()
+    fetchAlerts()
+    fetchProfile()
+
+    const storedRead = localStorage.getItem('smartrhu_read_notifs')
+    if (storedRead) {
+      try { setReadIds(new Set(JSON.parse(storedRead))) } catch {}
+    }
+
+    window.addEventListener('profileUpdated', fetchProfile)
+    window.addEventListener('avatarUpdated', fetchProfile)
+
+    // Live pharmacy-request notifications
+    const notifChannel = supabase
+      .channel('warehouse_notifications')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: NOTIF_TABLE, filter: `recipient_role=eq.${MY_ROLE}` },
+        (payload) => {
+          const incoming = payload.new as AppNotification
+          setNotifications(prev =>
+            prev.some(n => n.id === incoming.id) ? prev : [incoming, ...prev]
+          )
+        }
+      )
+      .subscribe()
+
+    return () => {
+      window.removeEventListener('profileUpdated', fetchProfile)
+      window.removeEventListener('avatarUpdated', fetchProfile)
+      supabase.removeChannel(notifChannel)
+    }
+  }, [])
+
+  // ── Close dropdowns on outside click ──
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) setShowProfile(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  // ── Clock ──
+  useEffect(() => {
+    const tick = () => setTime(
+      new Date().toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    )
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [])
+
   const showToastMsg = (msg: string, type: 'alert' | 'confirm') => {
     setToast(msg)
     setToastType(type)
     setTimeout(() => setToast(''), 3000)
   }
 
+  // Local read-tracking for the non-DB alert types (expiring / low stock)
   const markAsRead = (fingerprint: string) => {
     setReadIds(prev => {
       if (prev.has(fingerprint)) return prev
@@ -250,6 +310,37 @@ export default function Topbar() {
       localStorage.setItem('smartrhu_read_notifs', JSON.stringify(Array.from(next)))
       return next
     })
+  }
+
+  // Server-tracked read state for pharmacy-request notifications — marks
+  // every row that shares this request's group key (not just the one
+  // clicked), so a request that somehow produced more than one DB row
+  // doesn't leave a "ghost" unread entry behind.
+  const markGroupRead = async (n: AppNotification) => {
+    const key = groupKey(n)
+    const idsInGroup = notifications.filter(x => groupKey(x) === key).map(x => x.id)
+    if (!idsInGroup.length) return
+    setNotifications(prev => prev.map(x => idsInGroup.includes(x.id) ? { ...x, is_read: true } : x))
+    const { error } = await supabase.from(NOTIF_TABLE).update({ is_read: true }).in('id', idsInGroup)
+    if (error) console.error('[Topbar] markGroupRead error:', error)
+  }
+
+  const markAllNotificationsRead = async () => {
+    const unreadIds = notifications.filter(n => !n.is_read).map(n => n.id)
+    if (!unreadIds.length) return
+    setNotifications(prev => prev.map(n => ({ ...n, is_read: true })))
+    const { error } = await supabase.from(NOTIF_TABLE).update({ is_read: true }).in('id', unreadIds)
+    if (error) console.error('[Topbar] markAllNotificationsRead error:', error)
+  }
+
+  // Clicking a pharmacy-request notification now opens the request detail
+  // popup directly (RequestBatchModal) instead of just navigating away —
+  // it already carries related_request_id / related_batch_id, which is
+  // exactly what that modal needs to look up the request.
+  const handleRequestNotifClick = (n: AppNotification) => {
+    markGroupRead(n)
+    setShowNotif(false)
+    setOpenRequestNotif(n)
   }
 
   const handleAddMedicine = async () => {
@@ -293,44 +384,47 @@ export default function Topbar() {
     router.push(tab === 'password' ? '/warehouse/settings?tab=password' : '/warehouse/settings')
   }
 
-  const formatDate = (d: string) => new Date(d).toLocaleDateString('en-PH', {
-    month: 'short', day: 'numeric', year: 'numeric',
-    hour: '2-digit', minute: '2-digit'
-  })
-
   const initials = (userName || 'U').split(' ').filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2) || 'U'
-  const current = stockData[stockFilter]
-  const chartData = {
-    labels: current.labels,
-    datasets: [{ data: current.data, backgroundColor: current.colors, borderWidth: 0 }]
-  }
 
-  const filteredRequests = requests.filter(r =>
-    notifSearch.trim() === '' ? true :
-    r.medicine_name.toLowerCase().includes(notifSearch.toLowerCase()) ||
-    r.pharmacist_name.toLowerCase().includes(notifSearch.toLowerCase())
-  )
-
-  // Tag every notification with a stable fingerprint, then split into "new" vs "read"
-  const requestsTagged = requests.map(r => ({ ...r, fp: `req-${r.id}` }))
+  // Tag every non-DB alert with a stable fingerprint, then split into "new" vs "read"
   const expiringTagged = expiringAlerts.map(m => ({ ...m, fp: `exp-${m.id}` }))
   const lowStockTagged = lowStockAlerts.map(m => ({ ...m, fp: `low-${m.id}` }))
 
-  const newRequests  = requestsTagged.filter(r => !readIds.has(r.fp))
+  // Collapse notification rows that belong to the same request into one
+  // entry. Handles both the (now-fixed) per-item legacy trigger and any
+  // stray client-side duplicates: whichever row is most recent per group
+  // is shown, and the group counts as unread if any row in it is unread.
+  const groupedNotifications = useMemo(() => {
+    const map = new Map<string, AppNotification>()
+    for (const n of notifications) {
+      const key = groupKey(n)
+      const existing = map.get(key)
+      if (!existing) {
+        map.set(key, n)
+      } else {
+        // `notifications` is ordered newest-first, so `existing` is already
+        // the most recent row for this key — just fold in read state.
+        map.set(key, { ...existing, is_read: existing.is_read && n.is_read })
+      }
+    }
+    return Array.from(map.values())
+  }, [notifications])
+
+  const newDbNotifs  = groupedNotifications.filter(n => !n.is_read)
+  const readDbNotifs = groupedNotifications.filter(n => n.is_read)
+
   const newExpiring  = expiringTagged.filter(m => !readIds.has(m.fp))
   const newLowStock  = lowStockTagged.filter(m => !readIds.has(m.fp))
 
-  const readRequests = requestsTagged.filter(r => readIds.has(r.fp))
   const readExpiring = expiringTagged.filter(m => readIds.has(m.fp))
   const readLowStock = lowStockTagged.filter(m => readIds.has(m.fp))
 
-  const unreadCount = newRequests.length + newExpiring.length + newLowStock.length
-  const readCount = readRequests.length + readExpiring.length + readLowStock.length
-  const showRedDot = unreadCount > 0
+  const unreadCount = newDbNotifs.length + newExpiring.length + newLowStock.length
+  const readCount   = readDbNotifs.length + readExpiring.length + readLowStock.length
+  const showRedDot  = unreadCount > 0
 
   const openNotif = () => {
     setShowNotif(!showNotif)
-    setSelectedRequest(null)
     setSelectedAlert(null)
   }
 
@@ -364,9 +458,9 @@ export default function Topbar() {
               {showRedDot && <span className={styles.notifDot} />}
             </button>
 
-            {showNotif && !selectedRequest && !selectedAlert && (
+            {showNotif && !selectedAlert && (
               <div className={styles.dropdown} style={{ width: 320, maxHeight: 460, display: 'flex', flexDirection: 'column' }}>
-                <div className={styles.dropdownHeader}>
+                <div className={styles.dropdownHeader} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span className={styles.dropdownTitle}>Notifications</span>
                   {unreadCount > 0 && (
                     <span className={styles.dropdownBadge}>{unreadCount}</span>
@@ -399,25 +493,43 @@ export default function Topbar() {
                   </button>
                 </div>
 
+                {notifTab === 'new' && unreadCount > 0 && (
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '6px 12px 0' }}>
+                    <button
+                      onClick={markAllNotificationsRead}
+                      style={{ background: 'none', border: 'none', color: 'var(--green)', fontSize: 10, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+                    >
+                      Mark all read
+                    </button>
+                  </div>
+                )}
+
                 <div style={{ overflowY: 'auto', flex: 1 }}>
                   {notifTab === 'new' ? (
                     unreadCount === 0 ? (
                       <div className={styles.notifEmpty}>You're all caught up!</div>
                     ) : (
                       <>
-                        {newRequests.map(req => (
-                          <button
-                            key={req.fp}
-                            className={styles.notifItem}
-                            onClick={() => { markAsRead(req.fp); setSelectedRequest(req) }}>
-                            <div className={styles.notifItemTop}>
-                              <span className={styles.notifItemName}>Restock Request</span>
-                              <span className={styles.urgentBadge}>Urgent</span>
-                            </div>
-                            <div className={styles.notifItemSub}>{req.medicine_name} — {req.pharmacist_name}</div>
-                            <div className={styles.notifItemTime}>{formatDate(req.created_at)}</div>
-                          </button>
-                        ))}
+                        {newDbNotifs.map(n => {
+                          const badge = notifBadge(n.type)
+                          return (
+                            <button
+                              key={n.id}
+                              className={styles.notifItem}
+                              onClick={() => handleRequestNotifClick(n)}>
+                              <div className={styles.notifItemTop}>
+                                <span className={styles.notifItemName}>{n.title}</span>
+                                {badge && (
+                                  <span className={styles.urgentBadge} style={{ background: badge.bg, color: badge.color }}>
+                                    {badge.label}
+                                  </span>
+                                )}
+                              </div>
+                              <div className={styles.notifItemSub}>{n.message}</div>
+                              <div className={styles.notifItemTime}>{timeAgo(n.created_at)}</div>
+                            </button>
+                          )
+                        })}
 
                         {newExpiring.map(med => (
                           <button
@@ -461,19 +573,27 @@ export default function Topbar() {
                       <div className={styles.notifEmpty}>No read notifications yet</div>
                     ) : (
                       <>
-                        {readRequests.map(req => (
-                          <button
-                            key={req.fp}
-                            className={styles.notifItem}
-                            style={{ opacity: 0.6 }}
-                            onClick={() => setSelectedRequest(req)}>
-                            <div className={styles.notifItemTop}>
-                              <span className={styles.notifItemName}>Restock Request</span>
-                            </div>
-                            <div className={styles.notifItemSub}>{req.medicine_name} — {req.pharmacist_name}</div>
-                            <div className={styles.notifItemTime}>{formatDate(req.created_at)}</div>
-                          </button>
-                        ))}
+                        {readDbNotifs.map(n => {
+                          const badge = notifBadge(n.type)
+                          return (
+                            <button
+                              key={n.id}
+                              className={styles.notifItem}
+                              style={{ opacity: 0.6 }}
+                              onClick={() => { setShowNotif(false); setOpenRequestNotif(n) }}>
+                              <div className={styles.notifItemTop}>
+                                <span className={styles.notifItemName}>{n.title}</span>
+                                {badge && (
+                                  <span className={styles.urgentBadge} style={{ background: badge.bg, color: badge.color }}>
+                                    {badge.label}
+                                  </span>
+                                )}
+                              </div>
+                              <div className={styles.notifItemSub}>{n.message}</div>
+                              <div className={styles.notifItemTime}>{timeAgo(n.created_at)}</div>
+                            </button>
+                          )
+                        })}
 
                         {readExpiring.map(med => (
                           <button
@@ -611,108 +731,6 @@ export default function Topbar() {
         </div>
       </div>
 
-      {/* Restock Request Modal */}
-      {selectedRequest && (
-        <div className={styles.modalBackdrop}>
-          <div className={`${styles.modal} ${styles.restockModal}`}>
-
-            <div className={styles.restockLeft}>
-              <p className={styles.restockLeftTitle}>Requested Medicine</p>
-              {[
-                ['Requested by:', selectedRequest.pharmacist_name],
-                ['Medicine Name:', selectedRequest.medicine_name],
-                ['Mg/Dosage:', selectedRequest.dosage],
-                ['Medicine Type:', selectedRequest.medicine_type],
-                ['Quantity:', String(selectedRequest.quantity)],
-                ['Date and Time:', formatDate(selectedRequest.created_at)],
-              ].map(([label, value]) => (
-                <div key={label} className={styles.restockField}>
-                  <span className={styles.restockFieldLabel}>{label}</span>
-                  <span className={styles.restockFieldValue}>{value}</span>
-                </div>
-              ))}
-            </div>
-
-            <div className={styles.restockRight}>
-              <div className={styles.restockChartHeader}>Stock Levels</div>
-              <div className={styles.restockChart}>
-                <Doughnut
-                  data={chartData}
-                  options={{
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
-                    cutout: '60%'
-                  }}
-                />
-              </div>
-
-              <div className={styles.filterRow}>
-                {(['Highest','Medium','Lowest'] as FilterType[]).map(f => (
-                  <button
-                    key={f}
-                    onClick={() => { setStockFilter(f); setNotifSearch('') }}
-                    className={`${styles.filterBtn} ${
-                      stockFilter === f
-                        ? f === 'Highest' ? styles.filterBtnHighest
-                          : f === 'Medium' ? styles.filterBtnMedium
-                          : styles.filterBtnLowest
-                        : ''
-                    }`}>
-                    {f}
-                  </button>
-                ))}
-              </div>
-
-              <div className={styles.restockSearch}>
-                <Search size={13} className={styles.restockSearchIco} />
-                <input
-                  className={styles.restockSearchInput}
-                  placeholder="Search medicine name or dosage..."
-                  value={notifSearch}
-                  onChange={e => setNotifSearch(e.target.value)}
-                />
-              </div>
-
-              <div className={styles.restockList}>
-                <div className={styles.restockListHeader}>
-                  <span>Medicine</span>
-                  <span style={{ textAlign: 'center' }}>Mg/Dosage</span>
-                  <span style={{ textAlign: 'right' }}>Quantity</span>
-                </div>
-                {filteredRequests.length > 0 ? filteredRequests.map((req, i) => (
-                  <div key={i} className={styles.restockListItem}>
-                    <span className={styles.restockListItemName}>{req.medicine_name}</span>
-                    <span className={styles.restockListItemDosage}>{req.dosage}</span>
-                    <span className={styles.restockListItemQty}>{req.quantity}</span>
-                  </div>
-                )) : (
-                  <div className={styles.restockEmpty}>No requests found</div>
-                )}
-              </div>
-
-              <div className={styles.modalFooter} style={{ padding: 0, borderTop: 'none' }}>
-                <button
-                  className={styles.btnCancel}
-                  onClick={() => { setSelectedRequest(null); setShowNotif(false); setNotifSearch('') }}>
-                  CANCEL
-                </button>
-                <button
-                  className={styles.btnWarning}
-                  onClick={() => showToastMsg('Alert message has been sent!', 'alert')}>
-                  Send Alert
-                </button>
-                <button
-                  className={styles.btnConfirm}
-                  onClick={() => showToastMsg('Confirmation sent!', 'confirm')}>
-                  Send Confirmation
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Expiring / Low Stock Alert Detail Modal */}
       {selectedAlert && (
         <div className={styles.modalBackdrop} onClick={() => setSelectedAlert(null)}>
@@ -757,6 +775,18 @@ export default function Topbar() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Restock-request detail popup — opened from a notification click.
+          Shows request id, requester, date/time, items, and reason. */}
+      {openRequestNotif && (
+        <RequestBatchModal
+          notification={{
+            related_request_id: openRequestNotif.related_request_id,
+            related_batch_id: openRequestNotif.related_batch_id,
+          }}
+          onClose={() => setOpenRequestNotif(null)}
+        />
       )}
 
       {/* Add Medicine Modal */}
