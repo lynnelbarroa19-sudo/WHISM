@@ -22,8 +22,18 @@ interface RequestRow {
   request_batch_id: string | null
 }
 
+/** Warehouse stock for one medicine, expressed three ways so a mismatch
+ *  between the request's unit and the warehouse's packaging (boxes /
+ *  strips / loose pieces) never gets mislabeled. */
+interface StockBreakdown {
+  boxes: number     // sum of raw `boxes` across matching batches
+  strips: number     // full strips packed in those boxes + full strips from loose pieces
+  pieces: number     // canonical total, straight from the DB-generated `total_quantity` column
+  inRequestUnit: number // `pieces` converted into whatever unit the request was made in
+}
+
 interface EnrichedRow extends RequestRow {
-  warehouseStock: number
+  stock: StockBreakdown
 }
 
 interface RequestNotification {
@@ -52,6 +62,29 @@ function formatTime(iso: string) {
  *  "Paracetamol". */
 function normalizeMedName(s: string) {
   return s.replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase()
+}
+
+/** Maps a request's free-typed unit string to a packaging bucket. */
+function resolveUnitBucket(unit: string): 'box' | 'strip' | 'piece' {
+  const u = (unit ?? '').toLowerCase().trim()
+  if (u.startsWith('box')) return 'box'
+  if (u.startsWith('strip')) return 'strip'
+  return 'piece'
+}
+
+interface RawBatch {
+  boxes: number | null
+  strips_per_box: number | null
+  pieces_per_strip: number | null
+  loose_pieces: number | null
+  total_quantity: number | null
+  medicines: { generic_name: string; brand_name: string | null } | { generic_name: string; brand_name: string | null }[] | null
+}
+
+interface StockAgg {
+  boxes: number
+  strips: number
+  pieces: number
 }
 
 export default function RequestBatchModal({
@@ -96,27 +129,71 @@ export default function RequestBatchModal({
     // dosage tacked on, e.g. "Paracetamol (500mg)"), so we normalize both
     // sides and match against either the catalog's generic OR brand name
     // instead of requiring an exact string match.
+    //
+    // `total_quantity` is a DB-generated column
+    // (boxes*strips_per_box*pieces_per_strip + loose_pieces) and is ALWAYS
+    // expressed in pieces, regardless of how the pharmacist phrased the
+    // request. Previously this raw pieces number was displayed next to
+    // whatever unit the request happened to use (e.g. "Boxes"), which is
+    // why 800 pcs (= 8 boxes) was showing up as "800 Boxes". We now keep
+    // pieces as the canonical total and separately derive boxes/strips so
+    // the request's own unit can be converted correctly.
     const { data: batchData } = await supabase
       .from('medicine_batches')
-      .select('total_quantity, status, medicines(generic_name, brand_name)')
+      .select('boxes, strips_per_box, pieces_per_strip, loose_pieces, total_quantity, status, medicines(generic_name, brand_name)')
       .in('status', ['available', 'low_stock'])
-    const stockMap = new Map<string, number>()
-    for (const row of (batchData ?? []) as unknown as { total_quantity: number; medicines: { generic_name: string; brand_name: string | null } | { generic_name: string; brand_name: string | null }[] | null }[]) {
+
+    const stockMap = new Map<string, StockAgg>()
+    for (const row of (batchData ?? []) as unknown as RawBatch[]) {
       const medRel = row.medicines
       const med = Array.isArray(medRel) ? medRel[0] : medRel
       if (!med) continue
-      const qty = row.total_quantity ?? 0
-      for (const raw of [med.generic_name, med.brand_name]) {
-        if (!raw) continue
-        const key = normalizeMedName(raw)
-        stockMap.set(key, (stockMap.get(key) ?? 0) + qty)
-      }
+
+      const boxes = row.boxes ?? 0
+      const stripsPerBox = row.strips_per_box ?? 0
+      const piecesPerStrip = row.pieces_per_strip ?? 0
+      const loosePieces = row.loose_pieces ?? 0
+      const pieces = row.total_quantity ?? 0
+
+      // Full strips packed inside whole boxes, plus any full strips that
+      // can be formed from loose pieces. Leftover loose pieces that don't
+      // fill a whole strip are only ever counted in `pieces`.
+      const stripsFromBoxes = boxes * stripsPerBox
+      const stripsFromLoose = piecesPerStrip > 0 ? Math.floor(loosePieces / piecesPerStrip) : 0
+      const strips = stripsFromBoxes + stripsFromLoose
+
+      // A batch is indexed under exactly ONE name: its brand name if it
+      // has one, otherwise its generic name. This is deliberate — a
+      // generic-only catalog entry ("Paracetamol") and a branded entry
+      // that happens to share the same generic ingredient ("Paracetamol /
+      // Biogesic") are treated as separate, independently-stocked
+      // products. Matching a plain "Paracetamol" request against BOTH
+      // (via generic_name equality on both rows) was silently doubling
+      // the stock total. Requests must name the exact product — a
+      // generic-only request will not pull in branded stock, and vice
+      // versa.
+      const effectiveName = (med.brand_name && med.brand_name.trim()) ? med.brand_name : med.generic_name
+      if (!effectiveName) continue
+      const key = normalizeMedName(effectiveName)
+      const existing = stockMap.get(key) ?? { boxes: 0, strips: 0, pieces: 0 }
+      existing.boxes += boxes
+      existing.strips += strips
+      existing.pieces += pieces
+      stockMap.set(key, existing)
     }
 
-    const enriched: EnrichedRow[] = (reqData as RequestRow[]).map(r => ({
-      ...r,
-      warehouseStock: stockMap.get(normalizeMedName(r.medicine_name)) ?? 0,
-    }))
+    const enriched: EnrichedRow[] = (reqData as RequestRow[]).map(r => {
+      const agg = stockMap.get(normalizeMedName(r.medicine_name)) ?? { boxes: 0, strips: 0, pieces: 0 }
+      const bucket = resolveUnitBucket(r.unit)
+      const inRequestUnit =
+        bucket === 'box' ? agg.boxes :
+        bucket === 'strip' ? agg.strips :
+        agg.pieces
+      return {
+        ...r,
+        stock: { boxes: agg.boxes, strips: agg.strips, pieces: agg.pieces, inRequestUnit },
+      }
+    })
 
     setRows(enriched)
     setLoading(false)
@@ -145,7 +222,7 @@ export default function RequestBatchModal({
 
   function openAlert(row: EnrichedRow) {
     setAlertingId(row.id)
-    setAlertQty(Math.max(0, Math.min(row.requested_qty, row.warehouseStock)))
+    setAlertQty(Math.max(0, Math.min(row.requested_qty, row.stock.inRequestUnit)))
   }
 
   async function submitAlert(row: EnrichedRow) {
@@ -244,7 +321,7 @@ export default function RequestBatchModal({
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {rows.map(row => {
                 const s = STATUS_STYLE[row.status]
-                const short = row.warehouseStock < row.requested_qty
+                const short = row.stock.inRequestUnit < row.requested_qty
                 const isBusy = busyId === row.id
                 return (
                   <div
@@ -277,9 +354,14 @@ export default function RequestBatchModal({
                           <div><span style={{ color: 'var(--text3)' }}>Type: </span><strong>{row.dosage_form ?? '—'}</strong></div>
                           <div><span style={{ color: 'var(--text3)' }}>Unit: </span><strong>{row.unit}</strong></div>
                           <div><span style={{ color: 'var(--text3)' }}>Quantity: </span><strong>{row.requested_qty} {row.unit}</strong></div>
-                          <div>
+                          <div style={{ gridColumn: '1 / -1' }}>
                             <span style={{ color: 'var(--text3)' }}>Warehouse stock: </span>
-                            <strong style={{ color: short ? '#dc2626' : '#16a34a' }}>{row.warehouseStock} {row.unit}</strong>
+                            <strong style={{ color: short ? '#dc2626' : '#16a34a' }}>
+                              {row.stock.inRequestUnit} {row.unit}
+                            </strong>
+                            <span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 8 }}>
+                              ({row.stock.boxes} boxes · {row.stock.strips} strips · {row.stock.pieces} pcs)
+                            </span>
                           </div>
                         </div>
 
