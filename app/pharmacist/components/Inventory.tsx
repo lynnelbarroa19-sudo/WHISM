@@ -19,7 +19,7 @@ import {
   BatchStatus,
 } from "../lib/pharmacy";
 import AddMedicineModal from "./AddMedicinePage";
-import { Plus, Download, X, RotateCcw, Search, Archive as ArchiveIcon } from "lucide-react";
+import { Plus, Download, X, RotateCcw, Search, Archive as ArchiveIcon, Pencil } from "lucide-react";
 
 type Props = {
   onToast: (msg: string, type: "success" | "error") => void;
@@ -132,6 +132,163 @@ type ArchivedBatchRow = {
   archived_at: string;
 };
 
+/* ── Edit Batch modal — fixes/completes a batch's info directly (batch
+ *  number, expiry, storage, quantity breakdown). Mainly for the "blank"
+ *  batches the old fulfill-trigger created before it copied real
+ *  Warehouse batch data — those have no batch_number/expiration_date and
+ *  need manual correction. Also just generally useful for any batch. ── */
+function EditBatchModal({ batch, onClose, onSaved, onToast }: {
+  batch: BatchRow;
+  onClose: () => void;
+  onSaved: () => void;
+  onToast: (msg: string, type: "success" | "error") => void;
+}) {
+  const { t } = useTheme();
+  const [batchNumber, setBatchNumber] = useState(batch.batch_number ?? "");
+  const [expirationDate, setExpirationDate] = useState(batch.expiration_date ?? "");
+  const [storageLocation, setStorageLocation] = useState(batch.storage_location ?? "");
+  const [boxes, setBoxes] = useState(String(batch.boxes ?? 0));
+  const [stripsPerBox, setStripsPerBox] = useState(batch.strips_per_box != null ? String(batch.strips_per_box) : "");
+  const [piecesPerStrip, setPiecesPerStrip] = useState(batch.pieces_per_strip != null ? String(batch.pieces_per_strip) : "");
+  const [loosePieces, setLoosePieces] = useState(String(batch.loose_pieces ?? 0));
+  const [remarks, setRemarks] = useState(batch.remarks ?? "");
+  const [saving, setSaving] = useState(false);
+
+  const piecesPerBox = Math.max(0, (parseInt(stripsPerBox, 10) || 0) * (parseInt(piecesPerStrip, 10) || 0));
+  const previewTotal = (parseInt(boxes, 10) || 0) * piecesPerBox + (parseInt(loosePieces, 10) || 0);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const boxesN = Math.max(0, parseInt(boxes, 10) || 0);
+      const looseN = Math.max(0, parseInt(loosePieces, 10) || 0);
+      const total = boxesN * piecesPerBox + looseN;
+      const newStatus = total === 0 ? "out_of_stock" : total <= 10 ? "low_stock" : "available";
+
+      const { error } = await supabase.from("pharma_medicine_batches").update({
+        batch_number: batchNumber.trim() || null,
+        expiration_date: expirationDate || null,
+        storage_location: storageLocation.trim() || null,
+        boxes: boxesN,
+        strips_per_box: stripsPerBox.trim() ? Math.max(0, parseInt(stripsPerBox, 10) || 0) : null,
+        pieces_per_strip: piecesPerStrip.trim() ? Math.max(1, parseInt(piecesPerStrip, 10) || 1) : null,
+        loose_pieces: looseN,
+        remarks: remarks.trim() || null,
+        status: newStatus,
+      }).eq("batch_id", batch.batch_id);
+      if (error) throw error;
+
+      onToast("Batch updated.", "success");
+      onSaved();
+      onClose();
+    } catch (err: any) {
+      onToast(err.message || "Failed to update batch.", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inp: CSSProperties = {
+    border: `1.5px solid ${t.inputBorder}`, borderRadius: 8, padding: "9px 12px",
+    fontSize: 13, fontFamily: "inherit", outline: "none", background: t.modalBg,
+    color: t.modalText, width: "100%", height: 38, boxSizing: "border-box",
+  };
+  const lbl: CSSProperties = {
+    fontSize: 10.5, fontWeight: 700, color: t.text3, textTransform: "uppercase",
+    letterSpacing: "0.06em", marginBottom: 5, display: "block",
+  };
+  const row2: CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 };
+  const field: CSSProperties = { marginBottom: 14 };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: "min(480px, 94vw)", maxHeight: "88vh", overflowY: "auto",
+        background: t.cardBg, borderRadius: 18, border: `2px solid ${t.green}`,
+        boxShadow: "0 24px 60px rgba(0,0,0,0.4)", padding: "24px 26px",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
+          <div>
+            <div style={{ fontSize: 10.5, color: t.text3, fontWeight: 800, textTransform: "uppercase", letterSpacing: 1.2 }}>Edit Batch</div>
+            <div style={{ fontSize: 18, fontWeight: 900, color: t.text }}>{batch.pharma_medicines?.generic_name ?? "Medicine"}</div>
+          </div>
+          <button onClick={onClose} style={{ border: "none", background: "transparent", color: t.text3, cursor: "pointer", fontSize: 18, padding: 4 }}>✕</button>
+        </div>
+        {(!batch.batch_number || !batch.expiration_date) && (
+          <div style={{ background: "#fef3c7", border: "1px solid #fde047", borderRadius: 8, padding: "8px 12px", fontSize: 11.5, color: "#854d0e", marginBottom: 16, marginTop: 10 }}>
+            This batch is missing detail (likely created before Warehouse batch info was linked). Fill in what you know.
+          </div>
+        )}
+        {(batch.batch_number && batch.expiration_date) && <div style={{ marginBottom: 16 }} />}
+
+        <div style={{ ...row2, ...field }}>
+          <div>
+            <label style={lbl}>Batch Number</label>
+            <input value={batchNumber} onChange={e => setBatchNumber(e.target.value)} placeholder="e.g. B-2026-0451" style={inp} />
+          </div>
+          <div>
+            <label style={lbl}>Expiration Date</label>
+            <input type="date" value={expirationDate} onChange={e => setExpirationDate(e.target.value)} style={inp} />
+          </div>
+        </div>
+
+        <div style={field}>
+          <label style={lbl}>Storage Location</label>
+          <input value={storageLocation} onChange={e => setStorageLocation(e.target.value)} placeholder="e.g. Shelf A-3" style={inp} />
+        </div>
+
+        <div style={{ ...row2, ...field }}>
+          <div>
+            <label style={lbl}>Strips / Box (optional)</label>
+            <input type="number" min={0} value={stripsPerBox} onChange={e => setStripsPerBox(e.target.value)} placeholder="e.g. 10" style={inp} />
+          </div>
+          <div>
+            <label style={lbl}>Pieces / Strip (optional)</label>
+            <input type="number" min={0} value={piecesPerStrip} onChange={e => setPiecesPerStrip(e.target.value)} placeholder="e.g. 10" style={inp} />
+          </div>
+        </div>
+
+        <div style={{ ...row2, ...field }}>
+          <div>
+            <label style={lbl}>Boxes</label>
+            <input type="number" min={0} value={boxes} onChange={e => setBoxes(e.target.value)} style={inp} />
+          </div>
+          <div>
+            <label style={lbl}>Loose Pieces</label>
+            <input type="number" min={0} value={loosePieces} onChange={e => setLoosePieces(e.target.value)} style={inp} />
+          </div>
+        </div>
+
+        <div style={field}>
+          <label style={lbl}>Remarks (optional)</label>
+          <textarea value={remarks} onChange={e => setRemarks(e.target.value)} rows={2}
+            style={{ ...inp, height: "auto", padding: "8px 10px", resize: "vertical", fontFamily: "inherit" }} />
+        </div>
+
+        <div style={{
+          marginBottom: 18, background: t.surface2, borderRadius: 8, padding: "9px 14px",
+          textAlign: "center", border: `1px solid ${t.border}`,
+        }}>
+          <span style={{ fontSize: 11, color: t.text3 }}>New total: </span>
+          <span style={{ fontSize: 15, fontWeight: 900, color: t.green }}>{previewTotal} pcs</span>
+        </div>
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={onClose} style={{
+            flex: 1, padding: "11px 0", borderRadius: 9, border: `1.5px solid ${t.border2}`,
+            background: "transparent", color: t.text2, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+          }}>Cancel</button>
+          <button onClick={handleSave} disabled={saving} style={{
+            flex: 2, padding: "11px 0", borderRadius: 9, border: "none",
+            background: t.green, color: "#fff", fontSize: 13, fontWeight: 900, cursor: "pointer",
+            fontFamily: "inherit", opacity: saving ? 0.6 : 1,
+          }}>{saving ? "SAVING…" : "SAVE CHANGES"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Main component ── */
 export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
   const { t } = useTheme();
@@ -146,6 +303,7 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
   const [selected, setSelected] = useState<string[]>([]);
   const [showExport, setShowExport] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [editingBatch, setEditingBatch] = useState<BatchRow | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("drugs");
   const [showArchived, setShowArchived] = useState(false);
   const [search, setSearch] = useState("");
@@ -454,7 +612,19 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
                           <span style={{ color: t.text2, fontSize: 12 }}>{n + 1}</span>
                         </div>
                       </td>
-                      <td style={{ padding: "11px 12px", color: t.text2 }}>{b.batch_number || "—"}</td>
+                      <td style={{ padding: "11px 12px", color: t.text2 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span>{b.batch_number || "—"}</span>
+                          <button
+                            onClick={() => setEditingBatch(b)}
+                            title="Edit batch"
+                            style={{
+                              border: "none", background: "transparent", cursor: "pointer",
+                              color: t.text3, padding: 2, display: "flex", flexShrink: 0,
+                            }}
+                          ><Pencil size={12} /></button>
+                        </div>
+                      </td>
                       <td style={{ padding: "11px 12px", fontWeight: 700, color: t.text }}>{b.pharma_medicines?.generic_name ?? "—"}</td>
                       <td style={{ padding: "11px 12px", color: t.text2 }}>{b.pharma_medicines?.dosage_strength || "—"} / {b.pharma_medicines?.dosage_form || "—"}</td>
                       <td style={{ padding: "11px 12px", color: isExpiring ? "#dc2626" : t.text2 }}>
@@ -556,6 +726,14 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
       {/* Modals */}
       {showAddModal && (
         <AddMedicineModal onClose={() => setShowAddModal(false)} onSaved={() => { fetchMedicines(); fetchBatchRows(); onMedicineAdded?.(); }} onToast={onToast} defaultTab={activeTab} />
+      )}
+      {editingBatch && (
+        <EditBatchModal
+          batch={editingBatch}
+          onClose={() => setEditingBatch(null)}
+          onSaved={() => { fetchBatchRows(); fetchMedicines(); }}
+          onToast={onToast}
+        />
       )}
     </main>
   );
