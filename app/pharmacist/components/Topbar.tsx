@@ -6,7 +6,13 @@ import { useTheme } from '../lib/pharmacy'
 import { supabase } from '@/lib/supabase'
 
 type NotifKind = 'prescription' | 'restock'
-type RestockStatus = 'pending' | 'alerted' | 'confirmed' | 'rejected'
+// Matches the REAL enum on pharmacy_requests.status (see the
+// pharmacy_requests_status_check constraint) — was previously
+// 'pending' | 'alerted' | 'confirmed' | 'rejected', which doesn't match
+// any actual status value ('confirm', not 'confirmed'; 'received' was
+// missing entirely), so restock notifications could never be built
+// correctly even once the table/columns below are fixed.
+type RestockStatus = 'pending' | 'confirm' | 'alerted' | 'rejected' | 'received'
 
 type Notification = {
   id: string
@@ -137,6 +143,9 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
   const profileRef = useRef<HTMLDivElement>(null)
   const notifRef   = useRef<HTMLDivElement>(null)
 
+  // displayNameRef now holds the MATCHING key used to filter
+  // pharmacy_requests.requested_by — NOT necessarily the same string shown
+  // in the UI. See fetchMatchName() below for why these can differ.
   const displayNameRef = useRef('')
   const readIdsRef = useRef<Set<string>>(new Set())
 
@@ -235,17 +244,26 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     }
   }
 
-  const fetchRestockNotifications = async (pharmacistName: string) => {
-    if (!pharmacistName) return
+  /** Restock requests — reads from `pharmacy_requests` (was pointed at a
+   *  nonexistent `restock_requests` table before, so this never returned
+   *  anything). `matchName` must be the SAME string RequestMedicinePage.tsx
+   *  wrote into `requested_by` when the request was submitted — see
+   *  fetchMatchName() for why that's not the same as the profile display
+   *  name. Notifies on any status OTHER than 'pending' (confirm / alerted
+   *  / rejected / received) — 'confirm' is the one the user specifically
+   *  asked for ("kapag na-confirm ng warehouse"), the rest come along for
+   *  free from the same query/subscription. */
+  const fetchRestockNotifications = async (matchName: string) => {
+    if (!matchName) return
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
 
     const { data, error } = await supabase
-      .from('restock_requests')
-      .select('id, medicine_name, dosage, medicine_type, quantity, status, created_at')
-      .eq('pharmacist_name', pharmacistName)
+      .from('pharmacy_requests')
+      .select('id, medicine_name, dosage, dosage_form, requested_qty, unit, status, requested_by, requested_at')
+      .eq('requested_by', matchName)
       .neq('status', 'pending')
-      .gte('created_at', since)
-      .order('created_at', { ascending: false })
+      .gte('requested_at', since)
+      .order('requested_at', { ascending: false })
       .limit(20)
 
     if (error) {
@@ -259,31 +277,52 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     }
   }
 
+  /** Derives the SAME "requested_by" string RequestMedicinePage.tsx uses
+   *  when submitting a request — username, then full_name, then the email
+   *  prefix, straight from the auth session's user_metadata. This is
+   *  deliberately NOT `profileName` (which comes from the separate `users`
+   *  table and can read completely differently, e.g. "Ruth Poblete" vs.
+   *  the auth-metadata-derived "ruthaseradopoblete") — filtering restock
+   *  notifications by profileName silently matched nothing because the
+   *  two values are typically different strings for the same person. */
+  const fetchMatchName = async (): Promise<string> => {
+    const { data: { session } } = await supabase.auth.getSession()
+    const authUser = session?.user
+    if (!authUser) return ''
+    const meta = authUser.user_metadata as { username?: string; full_name?: string } | undefined
+    return meta?.username || meta?.full_name || authUser.email?.split('@')[0] || ''
+  }
+
   useEffect(() => {
-    const name = profileName || user?.name || ''
-    displayNameRef.current = name
-    readIdsRef.current = loadReadIds(name)
-    setNotifications(prev => prev.map(n =>
-      readIdsRef.current.has(n.id) ? { ...n, read: true } : n
-    ))
-    if (name) fetchRestockNotifications(name)
+    (async () => {
+      const matchName = await fetchMatchName()
+      const nameForReadState = matchName || profileName || user?.name || ''
+      displayNameRef.current = nameForReadState
+      readIdsRef.current = loadReadIds(nameForReadState)
+      setNotifications(prev => prev.map(n =>
+        readIdsRef.current.has(n.id) ? { ...n, read: true } : n
+      ))
+      if (nameForReadState) fetchRestockNotifications(nameForReadState)
+    })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileName, user?.name])
 
   function buildRestockNotif(row: any): Notification {
     const status: RestockStatus = (row.status ?? 'pending') as RestockStatus
     const label =
-      status === 'confirmed' ? 'Restock Confirmed' :
-      status === 'alerted'   ? 'Restock Alerted'   :
-      status === 'rejected'  ? 'Restock Rejected'  : 'Restock Update'
-    const detail = `${row.medicine_name}${row.dosage ? ` (${row.dosage})` : ''} · ${row.quantity} pcs`
+      status === 'confirm'  ? 'Restock Confirmed' :
+      status === 'received' ? 'Restock Received'  :
+      status === 'alerted'  ? 'Restock Alerted'   :
+      status === 'rejected' ? 'Restock Rejected'  : 'Restock Update'
+    const unitLabel = row.unit || 'pcs'
+    const detail = `${row.medicine_name}${row.dosage ? ` (${row.dosage})` : ''} · ${row.requested_qty} ${unitLabel}`
     return {
       id: `restock-${row.id}-${status}`,
       kind: 'restock',
       title: label,
-      sub: `${detail} · ${timeAgo(row.created_at)}`,
+      sub: `${detail} · ${timeAgo(row.requested_at)}`,
       read: false,
-      created_at: row.created_at,
+      created_at: row.requested_at,
       restockStatus: status,
     }
   }
@@ -327,17 +366,23 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /** Realtime restock status changes — fires the instant Warehouse flips a
+   *  pharmacy_requests row's status (confirm / alerted / rejected /
+   *  received) for THIS pharmacist's own request. Was subscribed to the
+   *  wrong table before (`restock_requests`, which Warehouse never writes
+   *  to); now points at `pharmacy_requests`, matched via the same
+   *  requested_by derivation as the initial fetch above. */
   useEffect(() => {
     const channel = supabase
       .channel('pharma_restock_status_notif')
       .on(
         'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'restock_requests' },
+        { event: 'UPDATE', schema: 'public', table: 'pharmacy_requests' },
         (payload) => {
           const row     = payload.new as any
           const oldRow  = payload.old as any
           const myName  = displayNameRef.current
-          if (!myName || row.pharmacist_name !== myName) return
+          if (!myName || row.requested_by !== myName) return
           if (row.status === oldRow?.status) return
           if (row.status === 'pending') return
 
@@ -471,10 +516,14 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     </svg>
   )
 
+  /** Colors match the STATUS_MAP already used in RequestMedicinePage.tsx's
+   *  history table, so a notification's accent color reads consistently
+   *  with the status pill the pharmacist sees when they open the request. */
   function restockAccent(status?: RestockStatus): string {
-    if (status === 'confirmed') return '#16a34a'
-    if (status === 'alerted')   return '#ca8a04'
-    if (status === 'rejected')  return '#dc2626'
+    if (status === 'confirm')  return '#2563eb'
+    if (status === 'received') return '#16a34a'
+    if (status === 'alerted')  return '#ca8a04'
+    if (status === 'rejected') return '#dc2626'
     return '#16a34a'
   }
 

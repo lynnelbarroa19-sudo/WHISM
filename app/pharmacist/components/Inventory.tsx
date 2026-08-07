@@ -7,6 +7,11 @@
 // loose_pieces — not "Box count + a fixed box-size label" like before.
 // Dispensing (see DispenseMedicine.tsx) now decrements all three correctly
 // via the box -> strip -> piece cascade.
+//
+// THIS PASS 2: added a "Strip (Qty)" column to the active batch table —
+// boxes * strips_per_box, shown only for "Boxes"-unit medicines (mirrors
+// how the Unit column already only shows a box count for that case).
+// Display-only; doesn't change any stored data or existing logic.
 "use client";
 import { CSSProperties, useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
@@ -47,6 +52,17 @@ type BatchRow = MedicineBatch & {
  *  applies when the medicine's Unit is literally "Boxes". */
 function isBoxUnit(unit: string | null | undefined): boolean {
   return (unit ?? "").trim().toLowerCase() === "boxes";
+}
+
+/** Total strips represented by this batch's boxes — boxes * strips_per_box.
+ *  Only meaningful for "Boxes"-unit medicines with a known strips_per_box;
+ *  returns null otherwise so the column can show "—" instead of a
+ *  misleading 0. This is purely a display computation — doesn't touch
+ *  loose_pieces, total_quantity, or any stored/derived stock figures. */
+function stripQty(b: BatchRow): number | null {
+  if (!isBoxUnit(b.pharma_medicines?.unit)) return null;
+  if (b.strips_per_box == null) return null;
+  return (b.boxes ?? 0) * b.strips_per_box;
 }
 
 async function exportToExcel(rows: BatchRow[], tabLabel: string) {
@@ -582,19 +598,20 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
                   <th style={{ ...thStyle, textAlign: "center" }}>Status</th>
                   <th style={thStyle}>Storage</th>
                   <th style={thStyle}>Unit</th>
+                  <th style={{ ...thStyle, textAlign: "right" }}>Strip (Qty)</th>
                   <th style={{ ...thStyle, textAlign: "right" }}>Quantity</th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={9} style={{ textAlign: "center", padding: 48, color: t.text2 }}>
+                  <tr><td colSpan={10} style={{ textAlign: "center", padding: 48, color: t.text2 }}>
                     <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
                       <div style={{ width: 30, height: 30, border: `3px solid ${t.green}`, borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
                       Loading medicines...
                     </div>
                   </td></tr>
                 ) : activeBatchRows.length === 0 ? (
-                  <tr><td colSpan={9} style={{ textAlign: "center", padding: 48, color: t.text2 }}>
+                  <tr><td colSpan={10} style={{ textAlign: "center", padding: 48, color: t.text2 }}>
                     {search || activeExtraFilterCount > 0 ? "No batches match your search/filters." : `No ${tabLabel.toLowerCase()} batches yet. Add a medicine to get started.`}
                   </td></tr>
                 ) : activeBatchRows.map((b, n) => {
@@ -603,6 +620,7 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
                   const isExpiring = days <= 30;
                   const rowBg = sel ? `${t.green}0d` : "transparent";
                   const boxUnit = isBoxUnit(b.pharma_medicines?.unit);
+                  const strips = stripQty(b);
 
                   return (
                     <tr key={b.batch_id} style={{ background: rowBg, borderBottom: `1px solid ${t.border}` }}>
@@ -637,6 +655,9 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
                       <td style={{ padding: "11px 12px", color: t.text2 }}>{b.storage_location || "—"}</td>
                       <td style={{ padding: "11px 12px", color: t.text2 }}>
                         {boxUnit ? `${b.boxes} box${b.boxes !== 1 ? "es" : ""}` : (b.pharma_medicines?.unit || "—")}
+                      </td>
+                      <td style={{ padding: "11px 12px", textAlign: "right", color: t.text2 }}>
+                        {strips != null ? `${strips} strip${strips !== 1 ? "s" : ""}` : "—"}
                       </td>
                       <td style={{ padding: "11px 12px", textAlign: "right", fontWeight: 800, color: t.green }}>
                         {b.total_quantity} {boxUnit ? "pcs" : (b.pharma_medicines?.unit || "pcs")}

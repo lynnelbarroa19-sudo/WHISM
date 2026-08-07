@@ -1,14 +1,11 @@
-// Dashboard.tsx — fixes: monthly trend chart no longer looks broken for
-// zero-value months (distinct empty-state placeholder instead of a
-// near-invisible sliver), peak month uses a green accent instead of red,
-// the summary sentence under the chart is gone, stat cards are reordered
-// to Dispensed Today / Drugs / Supplies, and Stock Levels now has A-Z /
-// Most Stock / Least Stock sorting.
 "use client";
 import { CSSProperties, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useTheme, MedicineStockSummary } from "../lib/pharmacy";
 import { fetchStockSummary } from "../lib/pharmacyData";
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+} from "recharts";
 
 type DispenseEntry = { medicine_id: string; quantity: number; dispensed_at: string; med_name: string };
 type StockSort = "az" | "most" | "least";
@@ -54,8 +51,15 @@ const StarIcon = ({ color = "#fff" }: { color?: string }) => (
     <polygon points="12 2 15 9 22 9.5 17 14.5 18.5 22 12 18 5.5 22 7 14.5 2 9.5 9 9" />
   </svg>
 );
+const BoxIcon = ({ size = 18 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 8L12 3 3 8v8l9 5 9-5V8z" /><path d="M3 8l9 5 9-5" /><line x1="12" y1="13" x2="12" y2="21" />
+  </svg>
+);
 
-function StatCard({ label, value, sub, icon }: { label: string; value: React.ReactNode; sub: string; icon: React.ReactElement }) {
+function StatCard({ label, value, sub, icon, loading }: {
+  label: string; value: React.ReactNode; sub: string; icon: React.ReactElement; loading?: boolean;
+}) {
   const { t } = useTheme();
   return (
     <div style={{
@@ -74,78 +78,85 @@ function StatCard({ label, value, sub, icon }: { label: string; value: React.Rea
       </span>
       <span style={{ fontSize: 13, fontWeight: 600, opacity: 0.9, position: "relative", zIndex: 1 }}>{label}</span>
       <div style={{ position: "relative", zIndex: 1 }}>
-        <div style={{ fontSize: 38, fontWeight: 900, lineHeight: 1 }}>{value}</div>
+        {loading ? (
+          <div style={{ width: 54, height: 30, borderRadius: 8, background: "rgba(255,255,255,0.25)", animation: "pulse 1.3s ease-in-out infinite" }} />
+        ) : (
+          <div style={{ fontSize: 38, fontWeight: 900, lineHeight: 1 }}>{value}</div>
+        )}
         <div style={{ fontSize: 11, opacity: 0.7, marginTop: 5 }}>{sub}</div>
       </div>
     </div>
   );
 }
 
-/* ── Monthly dispense trend ──────────────────────────────────────────────
-   FIX: months with 0 dispensed used to render as a ~4px green sliver sitting
-   on the baseline, which reads as "broken chart" rather than "no data".
-   Zero-value months now get an explicit dashed placeholder bar instead, so
-   it's visually clear those months simply had no activity. The peak month
-   is now called out in green (a filled bar + small star badge) instead of
-   red — red is reserved for actual danger states elsewhere in the app. ── */
+/* ── Monthly dispense trend — real area/line graph (recharts) ────────────
+   Was a hand-rolled CSS bar chart; now a proper graph with gridlines, axis
+   labels, and a hover tooltip showing the exact figure per month. The peak
+   month still gets called out — a small badge above the chart plus a
+   slightly larger highlighted dot on that point — same idea as before,
+   just on a real chart instead of custom divs. */
 function MonthlyTrendChart({ data }: { data: { label: string; value: number; isPeak: boolean }[] }) {
   const { t } = useTheme();
-  const max = Math.max(1, ...data.map(d => d.value));
-  const gridLines = [0.25, 0.5, 0.75, 1];
+  const peak = data.find(d => d.isPeak);
+
+  const PeakDot = (props: any) => {
+    const { cx, cy, payload } = props;
+    if (payload.isPeak) {
+      return (
+        <g>
+          <circle cx={cx} cy={cy} r={7} fill={t.green} fillOpacity={0.18} />
+          <circle cx={cx} cy={cy} r={4.5} fill={t.green} stroke="#fff" strokeWidth={2} />
+        </g>
+      );
+    }
+    return <circle cx={cx} cy={cy} r={3} fill={t.green} fillOpacity={0.85} stroke="#fff" strokeWidth={1.5} />;
+  };
 
   return (
-    <div style={{ width: "100%", padding: "4px 8px 0" }}>
-      <div style={{ position: "relative", height: 150 }}>
-        {/* Subtle horizontal gridlines for reference */}
-        {gridLines.map(g => (
-          <div key={g} style={{
-            position: "absolute", left: 0, right: 0, bottom: `${g * 100}%`,
-            borderTop: `1px dashed ${t.border}`, opacity: g === 1 ? 0 : 0.7,
-          }} />
-        ))}
-
-        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "flex-end", gap: 14 }}>
-          {data.map((d, i) => {
-            const hasData = d.value > 0;
-            const pct = hasData ? Math.max(6, Math.round((d.value / max) * 100)) : 0;
-            return (
-              <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, height: "100%", justifyContent: "flex-end" }}>
-                {d.isPeak && (
-                  <span style={{
-                    display: "flex", alignItems: "center", gap: 3, fontSize: 8.5, fontWeight: 900, color: "#fff",
-                    background: t.green, borderRadius: 20, padding: "2px 8px", letterSpacing: 0.3,
-                  }}>
-                    <StarIcon /> PEAK
-                  </span>
-                )}
-                <span style={{ fontSize: 11, fontWeight: 800, color: hasData ? t.text : "transparent" }}>{hasData ? d.value : "0"}</span>
-                {hasData ? (
-                  <div style={{
-                    width: "100%", maxWidth: 32, height: `${pct}%`, borderRadius: "8px 8px 2px 2px",
-                    background: d.isPeak
-                      ? `linear-gradient(180deg, ${t.green} 0%, ${t.greenLight} 100%)`
-                      : `linear-gradient(180deg, ${t.greenLight} 0%, ${t.surface2} 100%)`,
-                    border: d.isPeak ? "none" : `1.5px solid ${t.green}55`,
-                    minHeight: 10, transition: "height 0.3s ease",
-                  }} />
-                ) : (
-                  <div style={{
-                    width: "100%", maxWidth: 32, height: 10, borderRadius: 4,
-                    border: `1.5px dashed ${t.border}`, background: "transparent",
-                  }} />
-                )}
-              </div>
-            );
-          })}
+    <div style={{ width: "100%" }}>
+      {peak && (
+        <div style={{ display: "flex", justifyContent: "flex-end", padding: "0 8px 6px" }}>
+          <span style={{
+            display: "flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 800, color: "#fff",
+            background: t.green, borderRadius: 20, padding: "3px 10px", letterSpacing: 0.3,
+          }}>
+            <StarIcon /> PEAK · {peak.label} ({peak.value})
+          </span>
         </div>
-      </div>
-
-      {/* Baseline + month labels */}
-      <div style={{ borderTop: `1.5px solid ${t.border}`, marginTop: 2 }} />
-      <div style={{ display: "flex", gap: 14, marginTop: 8 }}>
-        {data.map((d, i) => (
-          <div key={i} style={{ flex: 1, textAlign: "center", fontSize: 10.5, color: t.text3, fontWeight: 700 }}>{d.label}</div>
-        ))}
+      )}
+      <div style={{ width: "100%", height: 190 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={data} margin={{ top: 8, right: 14, left: -18, bottom: 0 }}>
+            <defs>
+              <linearGradient id="dashDispenseFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={t.green} stopOpacity={0.35} />
+                <stop offset="95%" stopColor={t.green} stopOpacity={0.03} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 4" stroke={t.border} vertical={false} />
+            <XAxis
+              dataKey="label" tickLine={false} axisLine={{ stroke: t.border }}
+              tick={{ fontSize: 10.5, fontWeight: 700, fill: t.text3 }}
+            />
+            <YAxis
+              allowDecimals={false} tickLine={false} axisLine={false} width={34}
+              tick={{ fontSize: 10, fill: t.text3 }}
+            />
+            <Tooltip
+              cursor={{ stroke: t.green, strokeWidth: 1, strokeDasharray: "3 3" }}
+              contentStyle={{
+                borderRadius: 10, border: `1px solid ${t.border}`, fontSize: 12,
+                fontFamily: "inherit", background: t.cardBg, boxShadow: "0 6px 18px rgba(0,0,0,0.12)",
+              }}
+              labelStyle={{ fontWeight: 800, color: t.text, marginBottom: 2 }}
+              formatter={(value: any) => [`${value} unit${value !== 1 ? "s" : ""}`, "Dispensed"]}
+            />
+            <Area
+              type="monotone" dataKey="value" stroke={t.green} strokeWidth={2.5}
+              fill="url(#dashDispenseFill)" dot={<PeakDot />} activeDot={{ r: 6, fill: t.green, stroke: "#fff", strokeWidth: 2 }}
+            />
+          </AreaChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );
@@ -158,7 +169,8 @@ const SORT_OPTIONS: { key: StockSort; label: string }[] = [
 ];
 
 /** Injects a scoped thin-scrollbar style once, so the Stock Levels list
- *  can hold every inventory item without needing a bulky default scrollbar. */
+ *  can hold every inventory item without needing a bulky default scrollbar.
+ *  Also defines the stat-card loading pulse animation used above. */
 function useMiniScrollbar() {
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -171,6 +183,8 @@ function useMiniScrollbar() {
       .dash-mini-scroll::-webkit-scrollbar-track { background: transparent; }
       .dash-mini-scroll::-webkit-scrollbar-thumb { background: rgba(22,163,74,0.35); border-radius: 10px; }
       .dash-mini-scroll::-webkit-scrollbar-thumb:hover { background: rgba(22,163,74,0.55); }
+      @keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+      @keyframes dash-spin { to { transform: rotate(360deg); } }
     `;
     document.head.appendChild(style);
   }, []);
@@ -184,25 +198,51 @@ export default function Dashboard({ totalCount }: Props) {
   const [allDispense, setAllDispense] = useState<DispenseEntry[]>([]);
   const [stockSort, setStockSort] = useState<StockSort>("az");
 
+  // BUG FIX: previously there was no loading state at all — while the two
+  // fetches below were in flight, `medicines`/`allDispense` were still `[]`,
+  // so every panel briefly rendered its EMPTY state ("No medicines yet",
+  // "No dispense activity...", stat cards showing 0) before the real data
+  // arrived. On a slower connection this reads as broken/wrong analytics
+  // rather than "still loading". Both fetches now track their own loading
+  // flag, and every panel below shows a skeleton/spinner until its own data
+  // is actually in — never a false "empty" or "zero" state.
+  const [loadingMeds, setLoadingMeds] = useState(true);
+  const [loadingDispense, setLoadingDispense] = useState(true);
+
   const now = new Date();
 
-  useEffect(() => { fetchStockSummary().then(setMedicines).catch(() => setMedicines([])); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingMeds(true);
+    fetchStockSummary()
+      .then(rows => { if (!cancelled) setMedicines(rows); })
+      .catch(() => { if (!cancelled) setMedicines([]); })
+      .finally(() => { if (!cancelled) setLoadingMeds(false); });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
+    let cancelled = false;
     async function load() {
-      const start = new Date(now.getFullYear(), now.getMonth() - 5, 1).toISOString();
-      const { data, error } = await supabase
-        .from("pharma_dispense_log")
-        .select("medicine_id, quantity, dispensed_at, pharma_medicines(generic_name)")
-        .gte("dispensed_at", start);
-      if (!error && data) {
-        setAllDispense((data as any[]).map(r => ({
-          medicine_id: r.medicine_id, quantity: r.quantity, dispensed_at: r.dispensed_at,
-          med_name: r.pharma_medicines?.generic_name ?? "Unknown",
-        })));
+      setLoadingDispense(true);
+      try {
+        const start = new Date(now.getFullYear(), now.getMonth() - 5, 1).toISOString();
+        const { data, error } = await supabase
+          .from("pharma_dispense_log")
+          .select("medicine_id, quantity, dispensed_at, pharma_medicines(generic_name)")
+          .gte("dispensed_at", start);
+        if (!error && data && !cancelled) {
+          setAllDispense((data as any[]).map(r => ({
+            medicine_id: r.medicine_id, quantity: r.quantity, dispensed_at: r.dispensed_at,
+            med_name: r.pharma_medicines?.generic_name ?? "Unknown",
+          })));
+        }
+      } finally {
+        if (!cancelled) setLoadingDispense(false);
       }
     }
     load();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -223,6 +263,7 @@ export default function Dashboard({ totalCount }: Props) {
 
   const drugsCount = medicines.filter(m => m.category === "drugs").length;
   const suppliesCount = medicines.filter(m => m.category === "supplies").length;
+  const lowStockCount = medicines.filter(m => m.total_quantity > 0 && m.total_quantity <= 10).length;
   const maxQty = Math.max(1, ...medicines.map(m => m.total_quantity));
 
   const sortedStock = useMemo(() => {
@@ -266,6 +307,13 @@ export default function Dashboard({ totalCount }: Props) {
     return { label: "High Stock", color: t.green };
   };
 
+  const Spinner = ({ size = 22 }: { size?: number }) => (
+    <div style={{
+      width: size, height: size, border: `3px solid ${t.green}`, borderTopColor: "transparent",
+      borderRadius: "50%", animation: "dash-spin 0.8s linear infinite",
+    }} />
+  );
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? 14 : 16 }}>
 
@@ -274,11 +322,14 @@ export default function Dashboard({ totalCount }: Props) {
         <div style={{ fontSize: isMobile ? 22 : 30, fontWeight: 900, color: t.text, lineHeight: 1 }}>DASHBOARD</div>
       </div>
 
-      {/* Stat cards — reordered: Dispensed Today, Drugs, Supplies */}
-      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: isMobile ? 10 : 14 }}>
-        <StatCard label="Dispensed Today" value={totalDispensedToday} sub="units out today" icon={<CalendarIcon color="#fff" />} />
-        <StatCard label="Drugs" value={drugsCount} sub="medicine drugs" icon={<DrugIcon size={30} />} />
-        <StatCard label="Supplies" value={suppliesCount} sub="medicine supplies" icon={<SupplyIcon size={30} />} />
+      {/* Stat cards — Dispensed Today, Total Items, Drugs, Supplies. Each
+          card shows its own skeleton until its underlying fetch resolves,
+          instead of a misleading "0". */}
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4,1fr)", gap: isMobile ? 10 : 14 }}>
+        <StatCard label="Dispensed Today" value={totalDispensedToday} sub="units out today" icon={<CalendarIcon color="#fff" />} loading={loadingDispense} />
+        <StatCard label="Total Items" value={medicines.length} sub={`${lowStockCount} low stock`} icon={<BoxIcon size={30} />} loading={loadingMeds} />
+        <StatCard label="Drugs" value={drugsCount} sub="medicine drugs" icon={<DrugIcon size={30} />} loading={loadingMeds} />
+        <StatCard label="Supplies" value={suppliesCount} sub="medicine supplies" icon={<SupplyIcon size={30} />} loading={loadingMeds} />
       </div>
 
       {/* Expiring Soon + Monthly Dispense Trend */}
@@ -288,11 +339,13 @@ export default function Dashboard({ totalCount }: Props) {
           <div style={panelHead()}>
             <CalendarIcon color="#fff" /> Expiring Soon
             <span style={{ marginLeft: "auto", background: "rgba(255,255,255,0.25)", borderRadius: 12, padding: "1px 8px", fontSize: 10 }}>
-              {expiringMeds.length}
+              {loadingMeds ? "…" : expiringMeds.length}
             </span>
           </div>
           <div style={{ padding: 14, maxHeight: 320, overflowY: "auto" }}>
-            {expiringMeds.length === 0 ? (
+            {loadingMeds ? (
+              <div style={{ display: "flex", justifyContent: "center", padding: "36px 0" }}><Spinner /></div>
+            ) : expiringMeds.length === 0 ? (
               <div style={emptyMsg}>No medicines expiring soon</div>
             ) : expiringMeds.map(({ med, daysLeft }) => {
               const color = expiryColor(daysLeft);
@@ -321,7 +374,9 @@ export default function Dashboard({ totalCount }: Props) {
             <span style={{ display: "flex", alignItems: "center", gap: 8 }}><TrendIcon /> Monthly Dispense Trend</span>
           </div>
           <div style={{ padding: "18px 14px", flex: 1, display: "flex", alignItems: "center" }}>
-            {monthlyTrend.every(m => m.value === 0) ? (
+            {loadingDispense ? (
+              <div style={{ display: "flex", justifyContent: "center", width: "100%", padding: "36px 0" }}><Spinner /></div>
+            ) : monthlyTrend.every(m => m.value === 0) ? (
               <div style={{ ...emptyMsg, width: "100%" }}>No dispense activity in the last 6 months.</div>
             ) : (
               <MonthlyTrendChart data={monthlyTrend} />
@@ -345,11 +400,15 @@ export default function Dashboard({ totalCount }: Props) {
                 }}>{opt.label}</button>
               ))}
             </div>
-            <span style={{ background: "rgba(255,255,255,0.25)", borderRadius: 12, padding: "1px 8px", fontSize: 10 }}>{medicines.length} items</span>
+            <span style={{ background: "rgba(255,255,255,0.25)", borderRadius: 12, padding: "1px 8px", fontSize: 10 }}>
+              {loadingMeds ? "…" : `${medicines.length} items`}
+            </span>
           </div>
         </div>
         <div style={{ padding: 16 }}>
-          {sortedStock.length === 0 ? (
+          {loadingMeds ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: "40px 0" }}><Spinner /></div>
+          ) : sortedStock.length === 0 ? (
             <div style={emptyMsg}>No medicines yet</div>
           ) : (
             <div className="dash-mini-scroll" style={{ maxHeight: 360, overflowY: "auto", paddingRight: 6, display: "flex", flexDirection: "column", gap: 12 }}>

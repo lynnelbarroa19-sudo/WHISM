@@ -1,21 +1,3 @@
-// AddMedicinePage.tsx
-//
-// THIS PASS combines everything from the last few iterations into one
-// consistent flow:
-//   - Unit is back to a plain <select> dropdown. The previous "search or
-//     type" input for Unit cleared itself (and the box fields) the moment
-//     it was focused, which made it look "stuck" — clicking in to change
-//     the unit wiped what you'd already typed before you could pick a new
-//     one. A select never has that problem: click it, the full list is
-//     always there, pick a different one any time.
-//   - The quantity section still adapts to the chosen Unit: "Boxes" shows
-//     the Boxes × Strips/Box × Pieces/Strip + Loose Pieces breakdown;
-//     anything else shows one plain "Quantity (<unit>)" field.
-//   - Multi-item again: fill out one item, "+ Add to List", repeat, then a
-//     single "Confirm (N)" saves everything — no more clicking Confirm
-//     once per medicine.
-//   - Inline validation (red border + message under the field) runs when
-//     adding an item to the list, not just at the very end.
 "use client";
 import { CSSProperties, useRef, useState } from "react";
 import { useTheme, MEDICINE_TYPES, SUPPLY_TYPES, UNITS, MedicineCategory } from "../lib/pharmacy";
