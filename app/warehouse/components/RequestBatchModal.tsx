@@ -26,10 +26,10 @@ interface RequestRow {
  *  between the request's unit and the warehouse's packaging (boxes /
  *  strips / loose pieces) never gets mislabeled. */
 interface StockBreakdown {
-  boxes: number     // sum of raw `boxes` across matching batches
-  strips: number     // full strips packed in those boxes + full strips from loose pieces
-  pieces: number     // canonical total, straight from the DB-generated `total_quantity` column
-  inRequestUnit: number // `pieces` converted into whatever unit the request was made in
+  boxes: number
+  strips: number
+  pieces: number
+  inRequestUnit: number
 }
 
 interface EnrichedRow extends RequestRow {
@@ -42,18 +42,38 @@ interface RequestNotification {
 }
 
 const STATUS_STYLE: Record<ReqStatus, { bg: string; color: string; label: string }> = {
-  pending:  { bg: '#f3f4f6', color: '#6b7280', label: '● Pending'   },
-  confirm:  { bg: '#dbeafe', color: '#2563eb', label: '✓ Confirmed' },
-  alerted:  { bg: '#fef3c7', color: '#92400e', label: '⚠ Alerted'   },
-  rejected: { bg: '#fee2e2', color: '#dc2626', label: '✗ Rejected'  },
-  received: { bg: '#dcfce7', color: '#16a34a', label: '✓ Received'  },
+  pending:  { bg: '#fdf1d6', color: '#92660c', label: 'Pending'   },
+  confirm:  { bg: '#dcedff', color: '#1a5aa8', label: 'Confirmed' },
+  alerted:  { bg: '#fef3c7', color: '#92400e', label: 'Alerted'   },
+  rejected: { bg: '#fbdede', color: '#a3251f', label: 'Rejected'  },
+  received: { bg: '#dcf3e3', color: '#1f7a44', label: 'Received'  },
 }
 
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-PH', { month: '2-digit', day: '2-digit', year: 'numeric' })
+/** Same rollup used by the requests list page — surfaces whichever status
+ *  needs attention first, and only reports "settled" (received/rejected)
+ *  once every item in the request agrees. Kept in sync so the badge shown
+ *  here always matches the badge shown in the row you clicked. */
+function rollupStatus(statuses: ReqStatus[]): ReqStatus {
+  if (statuses.every(s => s === 'received')) return 'received'
+  if (statuses.every(s => s === 'rejected')) return 'rejected'
+  if (statuses.some(s => s === 'pending')) return 'pending'
+  if (statuses.some(s => s === 'alerted')) return 'alerted'
+  if (statuses.some(s => s === 'confirm')) return 'confirm'
+  return statuses[0]
 }
-function formatTime(iso: string) {
-  return new Date(iso).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', hour12: true })
+
+// Same PHT (UTC+8) formatting, en-PH locale, used by the requests list
+// page — kept identical here on purpose so the date/time in this modal's
+// header always matches what's shown in the row that opened it.
+function formatPHT(dateStr: string) {
+  return new Date(dateStr).toLocaleString('en-PH', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 /** Loose-match key for medicine names — trims, lowercases, and strips a
@@ -125,19 +145,17 @@ export default function RequestBatchModal({
     }
 
     // Warehouse stock: sum of available + low_stock batches, matched by
-    // name. Pharmacists type the medicine name freely (sometimes with the
-    // dosage tacked on, e.g. "Paracetamol (500mg)"), so we normalize both
-    // sides and match against either the catalog's generic OR brand name
-    // instead of requiring an exact string match.
-    //
-    // `total_quantity` is a DB-generated column
+    // name. `total_quantity` is a DB-generated column
     // (boxes*strips_per_box*pieces_per_strip + loose_pieces) and is ALWAYS
-    // expressed in pieces, regardless of how the pharmacist phrased the
-    // request. Previously this raw pieces number was displayed next to
-    // whatever unit the request happened to use (e.g. "Boxes"), which is
-    // why 800 pcs (= 8 boxes) was showing up as "800 Boxes". We now keep
-    // pieces as the canonical total and separately derive boxes/strips so
-    // the request's own unit can be converted correctly.
+    // in pieces, so we derive boxes/strips separately to convert into
+    // whatever unit the request used.
+    //
+    // A batch is matched by exactly ONE name: its brand name if it has
+    // one, otherwise its generic name. A generic-only catalog entry
+    // ("Paracetamol") and a branded entry that happens to share the same
+    // generic ingredient ("Paracetamol / Biogesic") are separate,
+    // independently-stocked products — a plain "Paracetamol" request must
+    // not silently pull in Biogesic-branded stock, and vice versa.
     const { data: batchData } = await supabase
       .from('medicine_batches')
       .select('boxes, strips_per_box, pieces_per_strip, loose_pieces, total_quantity, status, medicines(generic_name, brand_name)')
@@ -155,23 +173,10 @@ export default function RequestBatchModal({
       const loosePieces = row.loose_pieces ?? 0
       const pieces = row.total_quantity ?? 0
 
-      // Full strips packed inside whole boxes, plus any full strips that
-      // can be formed from loose pieces. Leftover loose pieces that don't
-      // fill a whole strip are only ever counted in `pieces`.
       const stripsFromBoxes = boxes * stripsPerBox
       const stripsFromLoose = piecesPerStrip > 0 ? Math.floor(loosePieces / piecesPerStrip) : 0
       const strips = stripsFromBoxes + stripsFromLoose
 
-      // A batch is indexed under exactly ONE name: its brand name if it
-      // has one, otherwise its generic name. This is deliberate — a
-      // generic-only catalog entry ("Paracetamol") and a branded entry
-      // that happens to share the same generic ingredient ("Paracetamol /
-      // Biogesic") are treated as separate, independently-stocked
-      // products. Matching a plain "Paracetamol" request against BOTH
-      // (via generic_name equality on both rows) was silently doubling
-      // the stock total. Requests must name the exact product — a
-      // generic-only request will not pull in branded stock, and vice
-      // versa.
       const effectiveName = (med.brand_name && med.brand_name.trim()) ? med.brand_name : med.generic_name
       if (!effectiveName) continue
       const key = normalizeMedName(effectiveName)
@@ -218,7 +223,6 @@ export default function RequestBatchModal({
 
   const confirmRow = (id: string) => updateRow(id, { status: 'confirm' })
   const rejectRow  = (id: string) => updateRow(id, { status: 'rejected' })
-  const receiveRow = (id: string) => updateRow(id, { status: 'received' })
 
   function openAlert(row: EnrichedRow) {
     setAlertingId(row.id)
@@ -237,12 +241,8 @@ export default function RequestBatchModal({
 
   const requester = rows[0]?.requested_by ?? ''
   const requestedAt = rows[0]?.requested_at
-  // "Reason" was submitted once for the whole request and stored in each
-  // row's `notes` — every row in the batch carries the same value.
-  const reason = rows[0]?.notes?.trim() || ''
-  // Prefer the shared batch id (multi-item requests); fall back to the
-  // single row's own id for legacy/one-item requests that predate batching.
-  const requestId = notification.related_batch_id || rows[0]?.request_batch_id || rows[0]?.id || ''
+  const totalQty = rows.reduce((sum, r) => sum + r.requested_qty, 0)
+  const overallStatus: ReqStatus | null = rows.length ? rollupStatus(rows.map(r => r.status)) : null
 
   return (
     <div
@@ -257,9 +257,9 @@ export default function RequestBatchModal({
       <div
         onClick={e => e.stopPropagation()}
         style={{
-          background: 'var(--surface, #fff)',
+          background: '#fff',
           borderRadius: 16,
-          width: '100%', maxWidth: 920,
+          width: '100%', maxWidth: 980,
           maxHeight: '85vh',
           display: 'flex', flexDirection: 'column',
           boxShadow: '0 20px 50px rgba(0,0,0,.25)',
@@ -268,184 +268,172 @@ export default function RequestBatchModal({
       >
         {/* Header */}
         <div style={{
-          padding: '16px 20px', borderBottom: '1px solid var(--border)',
-          display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexShrink: 0, gap: 12,
+          padding: '18px 22px', flexShrink: 0,
+          background: '#2e7d4f', color: '#fff',
+          display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
         }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--text)' }}>
-              Restock Request
-            </div>
+            <div style={{ fontSize: 16, fontWeight: 800 }}>Request Details</div>
             {!loading && rows.length > 0 && (
-              <>
-                <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 2 }}>
-                  {requester} · {formatDate(requestedAt!)} · {formatTime(requestedAt!)} · {rows.length} medicine{rows.length !== 1 ? 's' : ''}
-                </div>
-                {requestId && (
-                  <div style={{
-                    fontSize: 10.5, color: 'var(--text3)', marginTop: 6,
-                    display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
-                  }}>
-                    <span style={{ fontWeight: 700 }}>Request ID:</span>
-                    <span style={{
-                      fontFamily: 'monospace', fontSize: 10.5, color: 'var(--text2)',
-                      background: 'var(--surface2)', border: '1px solid var(--border)',
-                      borderRadius: 6, padding: '2px 7px', wordBreak: 'break-all',
-                    }}>{requestId}</span>
-                  </div>
-                )}
-                {reason && (
-                  <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 6, maxWidth: 620 }}>
-                    <span style={{ fontWeight: 700, color: 'var(--text3)' }}>Reason: </span>{reason}
-                  </div>
-                )}
-              </>
+              <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 4 }}>
+                {formatPHT(requestedAt!)} · {requester}
+              </div>
             )}
           </div>
           <button
             onClick={onClose}
             style={{
-              background: 'var(--surface2)', border: 'none', color: 'var(--text2)',
-              width: 28, height: 28, borderRadius: 8, cursor: 'pointer',
-              fontSize: 14, fontWeight: 700, lineHeight: 1, flexShrink: 0,
+              background: 'rgba(255,255,255,.18)', border: 'none', color: '#fff',
+              padding: '7px 14px', borderRadius: 8, cursor: 'pointer',
+              fontSize: 12.5, fontWeight: 700, flexShrink: 0, whiteSpace: 'nowrap',
             }}
-          >✕</button>
+          >✕ Close</button>
         </div>
 
         {/* Body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 20px' }}>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
           {loading ? (
-            <p className={styles.emptyText} style={{ padding: '24px 0' }}>Loading request…</p>
+            <p style={{ padding: '24px 22px', color: 'var(--text3, #6b8a75)', fontSize: 13 }}>Loading request…</p>
           ) : rows.length === 0 ? (
-            <p className={styles.emptyText} style={{ padding: '24px 0' }}>Request not found.</p>
+            <p style={{ padding: '24px 22px', color: 'var(--text3, #6b8a75)', fontSize: 13 }}>Request not found.</p>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {rows.map(row => {
-                const s = STATUS_STYLE[row.status]
-                const short = row.stock.inRequestUnit < row.requested_qty
-                const isBusy = busyId === row.id
-                return (
-                  <div
-                    key={row.id}
-                    style={{
-                      border: '1px solid var(--border)', borderRadius: 12,
-                      padding: '14px 16px', background: 'var(--surface2)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                      <div style={{ flex: 1, minWidth: 260 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
-                          <span style={{ fontSize: 14, fontWeight: 800, color: 'var(--text)' }}>{row.medicine_name}</span>
-                          <span style={{
-                            fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
-                            background: 'var(--surface)', color: 'var(--text3)', textTransform: 'capitalize',
-                          }}>
-                            {row.category}
-                          </span>
-                          <span style={{ background: s.bg, color: s.color, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20 }}>
-                            {s.label}
-                          </span>
-                        </div>
+            <>
+              {/* Overall status strip */}
+              <div style={{
+                padding: '14px 22px', display: 'flex', alignItems: 'center',
+                justifyContent: 'space-between', flexWrap: 'wrap', gap: 8,
+                borderBottom: '1px solid #e2ede5',
+              }}>
+                <div style={{ fontSize: 13, color: '#4c6b58' }}>
+                  Overall status:{' '}
+                  <span style={{
+                    background: STATUS_STYLE[overallStatus!].bg, color: STATUS_STYLE[overallStatus!].color,
+                    fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 20, marginLeft: 4,
+                  }}>
+                    {STATUS_STYLE[overallStatus!].label}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: '#6b8a75' }}>
+                  {rows.length} item{rows.length !== 1 ? 's' : ''} · {totalQty} total units
+                </div>
+              </div>
 
-                        <div style={{
-                          display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))',
-                          gap: '6px 16px', fontSize: 11, color: 'var(--text2)',
-                        }}>
-                          <div><span style={{ color: 'var(--text3)' }}>Dosage: </span><strong>{row.dosage ?? '—'}</strong></div>
-                          <div><span style={{ color: 'var(--text3)' }}>Type: </span><strong>{row.dosage_form ?? '—'}</strong></div>
-                          <div><span style={{ color: 'var(--text3)' }}>Unit: </span><strong>{row.unit}</strong></div>
-                          <div><span style={{ color: 'var(--text3)' }}>Quantity: </span><strong>{row.requested_qty} {row.unit}</strong></div>
-                          <div style={{ gridColumn: '1 / -1' }}>
-                            <span style={{ color: 'var(--text3)' }}>Warehouse stock: </span>
-                            <strong style={{ color: short ? '#dc2626' : '#16a34a' }}>
-                              {row.stock.inRequestUnit} {row.unit}
-                            </strong>
-                            <span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 8 }}>
-                              ({row.stock.boxes} boxes · {row.stock.strips} strips · {row.stock.pieces} pcs)
-                            </span>
-                          </div>
-                        </div>
+              {/* Items table */}
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr>
+                      {['#', 'GENERIC NAME / NAME', 'BRAND', 'DOSAGE', 'TYPE', 'QTY', 'WAREHOUSE STOCK', 'NOTES', 'STATUS', ''].map(h => (
+                        <th key={h} style={{
+                          textAlign: 'left', padding: '10px 16px', fontSize: 11,
+                          textTransform: 'uppercase', letterSpacing: '.06em',
+                          color: '#6b8a75', borderBottom: '1px solid #e2ede5', whiteSpace: 'nowrap',
+                        }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row, idx) => {
+                      const s = STATUS_STYLE[row.status]
+                      const short = row.stock.inRequestUnit < row.requested_qty
+                      const isBusy = busyId === row.id
+                      return (
+                        <>
+                          <tr key={row.id} style={{ borderBottom: alertingId === row.id ? 'none' : '1px solid #eef4f0' }}>
+                            <td style={{ padding: '12px 16px', color: '#6b8a75' }}>{idx + 1}</td>
+                            <td style={{ padding: '12px 16px', fontWeight: 700 }}>{row.medicine_name}</td>
+                            <td style={{ padding: '12px 16px', color: '#6b8a75' }}>—</td>
+                            <td style={{ padding: '12px 16px' }}>{row.dosage ?? '—'}</td>
+                            <td style={{ padding: '12px 16px' }}>{row.dosage_form ?? '—'}</td>
+                            <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>{row.requested_qty} {row.unit}</td>
+                            <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>
+                              <span style={{ color: short ? '#a3251f' : '#1f7a44', fontWeight: 700 }}>
+                                {row.stock.inRequestUnit} {row.unit}
+                              </span>
+                              <div style={{ fontSize: 10, color: '#9ab3a2' }}>
+                                {row.stock.boxes} boxes · {row.stock.strips} strips · {row.stock.pieces} pcs
+                              </div>
+                            </td>
+                            <td style={{ padding: '12px 16px', color: '#6b8a75', maxWidth: 180 }}>{row.notes || '—'}</td>
+                            <td style={{ padding: '12px 16px' }}>
+                              <span style={{
+                                background: s.bg, color: s.color, fontSize: 11, fontWeight: 700,
+                                padding: '3px 10px', borderRadius: 20, whiteSpace: 'nowrap',
+                              }}>{s.label}</span>
+                            </td>
+                            <td style={{ padding: '12px 16px' }}>
+                              {(row.status === 'pending' || row.status === 'alerted') && (
+                                <div style={{ display: 'flex', gap: 6 }}>
+                                  <button
+                                    disabled={isBusy}
+                                    onClick={() => confirmRow(row.id)}
+                                    style={{ background: '#dbeafe', color: '#2563eb', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                                  >Confirm</button>
+                                  {row.status === 'pending' && (
+                                    <button
+                                      disabled={isBusy}
+                                      onClick={() => openAlert(row)}
+                                      style={{ background: '#fef3c7', color: '#92400e', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                                    >Alert</button>
+                                  )}
+                                  <button
+                                    disabled={isBusy}
+                                    onClick={() => rejectRow(row.id)}
+                                    style={{ background: '#fee2e2', color: '#dc2626', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                                  >Reject</button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
 
-                        {row.status === 'alerted' && row.fulfilled_qty != null && (
-                          <div style={{ marginTop: 8, fontSize: 11, color: '#92400e', fontWeight: 600 }}>
-                            ⚠ Na-alert kay pharmacy: {row.fulfilled_qty}/{row.requested_qty} {row.unit} lang ang available.
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Actions */}
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0 }}>
-                        {(row.status === 'pending' || row.status === 'alerted') && (
-                          <div style={{ display: 'flex', gap: 6 }}>
-                            <button
-                              disabled={isBusy}
-                              onClick={() => confirmRow(row.id)}
-                              style={{ background: '#dbeafe', color: '#2563eb', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit' }}
-                            >Confirm</button>
-                            {row.status === 'pending' && (
-                              <button
-                                disabled={isBusy}
-                                onClick={() => openAlert(row)}
-                                style={{ background: '#fef3c7', color: '#92400e', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit' }}
-                              >Alert</button>
-                            )}
-                            <button
-                              disabled={isBusy}
-                              onClick={() => rejectRow(row.id)}
-                              style={{ background: '#fee2e2', color: '#dc2626', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit' }}
-                            >Reject</button>
-                          </div>
-                        )}
-                        {row.status === 'confirm' && (
-                          <button
-                            disabled={isBusy}
-                            onClick={() => receiveRow(row.id)}
-                            style={{ background: '#16a34a', color: '#fff', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit' }}
-                          >Mark received</button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Inline alert-qty form */}
-                    {alertingId === row.id && (
-                      <div style={{
-                        marginTop: 10, padding: '10px 12px', borderRadius: 10,
-                        background: '#fffbeb', border: '1px solid #fde68a',
-                      }}>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: '#92400e', marginBottom: 6 }}>
-                          Ilang {row.unit} ng {row.medicine_name} ang meron sa warehouse ngayon?
-                        </div>
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                          <input
-                            type="number"
-                            min={0}
-                            max={row.requested_qty}
-                            value={alertQty}
-                            onChange={e => {
-                              const v = Number(e.target.value)
-                              setAlertQty(Math.max(0, Math.min(row.requested_qty, Number.isNaN(v) ? 0 : v)))
-                            }}
-                            style={{
-                              width: 90, padding: '6px 8px', borderRadius: 7,
-                              border: '1px solid var(--border)', fontSize: 12, fontFamily: 'inherit',
-                            }}
-                          />
-                          <span style={{ fontSize: 11, color: 'var(--text3)' }}>/ {row.requested_qty} {row.unit} hiniling</span>
-                          <div style={{ flex: 1 }} />
-                          <button
-                            onClick={() => setAlertingId(null)}
-                            style={{ background: 'var(--surface)', color: 'var(--text2)', border: '1px solid var(--border)', fontSize: 10, fontWeight: 600, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit' }}
-                          >Cancel</button>
-                          <button
-                            onClick={() => submitAlert(row)}
-                            style={{ background: '#ca8a04', color: '#fff', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit' }}
-                          >Send Alert</button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
+                          {/* Inline alert-qty form, spans the full row width */}
+                          {alertingId === row.id && (
+                            <tr key={`${row.id}-alert`} style={{ borderBottom: '1px solid #eef4f0' }}>
+                              <td colSpan={10} style={{ padding: '0 16px 14px' }}>
+                                <div style={{
+                                  padding: '10px 12px', borderRadius: 10,
+                                  background: '#fffbeb', border: '1px solid #fde68a',
+                                }}>
+                                  <div style={{ fontSize: 10, fontWeight: 700, color: '#92400e', marginBottom: 6 }}>
+                                    Ilang {row.unit} ng {row.medicine_name} ang meron sa warehouse ngayon?
+                                  </div>
+                                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={row.requested_qty}
+                                      value={alertQty}
+                                      onChange={e => {
+                                        const v = Number(e.target.value)
+                                        setAlertQty(Math.max(0, Math.min(row.requested_qty, Number.isNaN(v) ? 0 : v)))
+                                      }}
+                                      style={{
+                                        width: 90, padding: '6px 8px', borderRadius: 7,
+                                        border: '1px solid #cfe4d6', fontSize: 12, fontFamily: 'inherit',
+                                      }}
+                                    />
+                                    <span style={{ fontSize: 11, color: '#6b8a75' }}>/ {row.requested_qty} {row.unit} hiniling</span>
+                                    <div style={{ flex: 1 }} />
+                                    <button
+                                      onClick={() => setAlertingId(null)}
+                                      style={{ background: '#fff', color: '#4c6b58', border: '1px solid #cfe4d6', fontSize: 10, fontWeight: 600, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit' }}
+                                    >Cancel</button>
+                                    <button
+                                      onClick={() => submitAlert(row)}
+                                      style={{ background: '#ca8a04', color: '#fff', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit' }}
+                                    >Send Alert</button>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       </div>

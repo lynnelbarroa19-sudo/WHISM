@@ -4,23 +4,26 @@ import { useTheme } from 'next-themes'
 import { createClient } from '@supabase/supabase-js'
 import Sidebar from '../components/Sidebar'
 import Topbar from '../components/Topbar'
+import RequestBatchModal from '../components/RequestBatchModal'
 import styles from './PharmacyRequest.module.css'
 
 /**
  * ─────────────────────────────────────────────────────────────────────────
- * SCHEMA ASSUMPTION — adjust here if your actual table/columns differ.
+ * SCHEMA — matches `pharmacy_requests` as used by RequestBatchModal.
  * Table: `pharmacy_requests`
- *   id               uuid
- *   medicine_name    text
- *   requested_qty    int4
- *   unit             text            e.g. "box", "vial", "tab"
- *   status           text            'pending' | 'approved' | 'rejected' | 'fulfilled'
- *   requested_by     text            pharmacist name
- *   requested_at     timestamptz
- *   notes            text | null
- *   fulfilled_at     timestamptz | null
- * If your table/columns are named differently, only this block + the
- * `PharmacyRequest` type + the `.select()` string need to change.
+ *   id                uuid
+ *   medicine_name     text
+ *   dosage            text | null
+ *   dosage_form       text | null
+ *   category          'drugs' | 'supplies'
+ *   requested_qty     int4
+ *   unit              text            e.g. "Boxes", "Strips", "Pieces"
+ *   status            text            'pending' | 'confirm' | 'alerted' | 'rejected' | 'received'
+ *   requested_by      text            pharmacist name
+ *   requested_at      timestamptz
+ *   notes             text | null     shared "reason" for the whole request
+ *   fulfilled_qty     int4 | null
+ *   request_batch_id  uuid | null     groups multiple medicines submitted together
  * ─────────────────────────────────────────────────────────────────────────
  */
 
@@ -29,25 +32,43 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!
 )
 
-type RequestStatus = 'pending' | 'approved' | 'rejected' | 'fulfilled'
+type RequestStatus = 'pending' | 'confirm' | 'alerted' | 'rejected' | 'received'
 
-type PharmacyRequest = {
+type PharmacyRequestItem = {
   id: string
   medicine_name: string
+  dosage: string | null
+  dosage_form: string | null
+  category: 'drugs' | 'supplies'
   requested_qty: number
   unit: string
   status: RequestStatus
   requested_by: string
   requested_at: string
   notes: string | null
-  fulfilled_at: string | null
+  fulfilled_qty: number | null
+  request_batch_id: string | null
+}
+
+/** One row in the table — one or more items submitted together. */
+type GroupedRequest = {
+  key: string
+  batchId: string | null
+  singleId: string | null // set only when this "group" is really just one legacy, non-batched row
+  items: PharmacyRequestItem[]
+  requestedBy: string
+  requestedAt: string
+  notes: string | null
+  totalQty: number
+  status: RequestStatus
 }
 
 const STATUS_TABS: { key: 'all' | RequestStatus; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'pending', label: 'Pending' },
-  { key: 'approved', label: 'Approved' },
-  { key: 'fulfilled', label: 'Fulfilled' },
+  { key: 'confirm', label: 'Confirmed' },
+  { key: 'alerted', label: 'Alerted' },
+  { key: 'received', label: 'Received' },
   { key: 'rejected', label: 'Rejected' },
 ]
 
@@ -63,6 +84,19 @@ function formatPHT(dateStr: string) {
   })
 }
 
+/** When a request bundles several medicines, each item can technically end
+ *  up with a different status (confirmed one, alerted on another, etc).
+ *  Surface whichever needs attention first; only show a "settled" status
+ *  (received/rejected) once every item in the group agrees. */
+function rollupStatus(statuses: RequestStatus[]): RequestStatus {
+  if (statuses.every((s) => s === 'received')) return 'received'
+  if (statuses.every((s) => s === 'rejected')) return 'rejected'
+  if (statuses.some((s) => s === 'pending')) return 'pending'
+  if (statuses.some((s) => s === 'alerted')) return 'alerted'
+  if (statuses.some((s) => s === 'confirm')) return 'confirm'
+  return statuses[0]
+}
+
 function StatusBadge({ status }: { status: RequestStatus }) {
   return <span className={`${styles.badge} ${styles[`badge_${status}`]}`}>{status}</span>
 }
@@ -70,12 +104,11 @@ function StatusBadge({ status }: { status: RequestStatus }) {
 export default function PharmacyRequestsRecordsPage() {
   const { theme } = useTheme()
   const [mounted, setMounted] = useState(false)
-  const [requests, setRequests] = useState<PharmacyRequest[]>([])
+  const [requests, setRequests] = useState<PharmacyRequestItem[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'all' | RequestStatus>('all')
   const [search, setSearch] = useState('')
-  const [actioningId, setActioningId] = useState<string | null>(null)
-  const [toast, setToast] = useState('')
+  const [openNotification, setOpenNotification] = useState<{ related_batch_id: string | null; related_request_id: string | null } | null>(null)
 
   useEffect(() => setMounted(true), [])
 
@@ -83,10 +116,10 @@ export default function PharmacyRequestsRecordsPage() {
     setLoading(true)
     const { data, error } = await supabase
       .from('pharmacy_requests')
-      .select('id, medicine_name, requested_qty, unit, status, requested_by, requested_at, notes, fulfilled_at')
+      .select('id, medicine_name, dosage, dosage_form, category, requested_qty, unit, status, requested_by, requested_at, notes, fulfilled_qty, request_batch_id')
       .order('requested_at', { ascending: false })
 
-    if (!error && data) setRequests(data as PharmacyRequest[])
+    if (!error && data) setRequests(data as PharmacyRequestItem[])
     setLoading(false)
   }, [])
 
@@ -106,46 +139,56 @@ export default function PharmacyRequestsRecordsPage() {
     }
   }, [fetchRequests])
 
+  // Group individual pharmacy_requests rows into one row per submission —
+  // items that share a request_batch_id were submitted together and
+  // should read as a single request, matching how Pharmacy sees its own
+  // history (one entry per "New Request", listing every medicine inside it).
+  const grouped = useMemo<GroupedRequest[]>(() => {
+    const map = new Map<string, PharmacyRequestItem[]>()
+    for (const r of requests) {
+      const key = r.request_batch_id ?? r.id
+      const arr = map.get(key) ?? []
+      arr.push(r)
+      map.set(key, arr)
+    }
+
+    const rows: GroupedRequest[] = []
+    for (const [key, items] of map.entries()) {
+      const first = items[0]
+      rows.push({
+        key,
+        batchId: first.request_batch_id,
+        singleId: first.request_batch_id ? null : first.id,
+        items,
+        requestedBy: first.requested_by,
+        requestedAt: first.requested_at,
+        notes: first.notes,
+        totalQty: items.reduce((sum, i) => sum + i.requested_qty, 0),
+        status: rollupStatus(items.map((i) => i.status)),
+      })
+    }
+
+    rows.sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime())
+    return rows
+  }, [requests])
+
   const filtered = useMemo(() => {
-    return requests.filter((r) => {
-      const matchesTab = activeTab === 'all' || r.status === activeTab
+    return grouped.filter((g) => {
+      const matchesTab = activeTab === 'all' || g.status === activeTab
       const q = search.trim().toLowerCase()
       const matchesSearch =
         !q ||
-        r.medicine_name.toLowerCase().includes(q) ||
-        r.requested_by.toLowerCase().includes(q)
+        g.items.some((i) => i.medicine_name.toLowerCase().includes(q)) ||
+        g.requestedBy.toLowerCase().includes(q)
       return matchesTab && matchesSearch
     })
-  }, [requests, activeTab, search])
+  }, [grouped, activeTab, search])
 
   const counts = useMemo(() => {
-    const c: Record<string, number> = { all: requests.length }
-    for (const r of requests) c[r.status] = (c[r.status] || 0) + 1
+    const c: Record<string, number> = { all: grouped.length }
+    for (const g of grouped) c[g.status] = (c[g.status] || 0) + 1
     return c
-  }, [requests])
-
-  const handleAction = async (id: string, next: RequestStatus) => {
-    setActioningId(id)
-    const patch: Partial<PharmacyRequest> =
-      next === 'fulfilled'
-        ? { status: next, fulfilled_at: new Date().toISOString() }
-        : { status: next }
-
-    const { error } = await supabase.from('pharmacy_requests').update(patch).eq('id', id)
-
-    if (!error) {
-      setRequests((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
-      setToast(
-        next === 'approved'
-          ? 'Request approved.'
-          : next === 'rejected'
-          ? 'Request rejected.'
-          : 'Marked as fulfilled.'
-      )
-      setTimeout(() => setToast(''), 3000)
-    }
-    setActioningId(null)
-  }
+  }, [grouped])
 
   return (
     <div className={`${styles.root} ${mounted && theme === 'dark' ? styles.dark : ''}`}>
@@ -193,57 +236,41 @@ export default function PharmacyRequestsRecordsPage() {
               <table className={styles.table}>
                 <thead>
                   <tr>
-                    <th>Medicine</th>
-                    <th>Qty</th>
+                    <th>#</th>
+                    <th>Date</th>
                     <th>Requested by</th>
-                    <th>Date requested</th>
+                    <th>Items</th>
+                    <th>Quantity</th>
                     <th>Status</th>
                     <th>Notes</th>
-                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((r) => (
-                    <tr key={r.id}>
-                      <td className={styles.medicineCell}>{r.medicine_name}</td>
-                      <td>
-                        {r.requested_qty} {r.unit}
+                  {filtered.map((g, idx) => (
+                    <tr
+                      key={g.key}
+                      className={styles.rowClickable}
+                      onClick={() =>
+                        setOpenNotification({ related_batch_id: g.batchId, related_request_id: g.singleId })
+                      }
+                    >
+                      <td>{idx + 1}</td>
+                      <td>{formatPHT(g.requestedAt)}</td>
+                      <td>{g.requestedBy}</td>
+                      <td className={styles.itemsCell}>
+                        {g.items.map((i) => (
+                          <div key={i.id}>{i.medicine_name}</div>
+                        ))}
                       </td>
-                      <td>{r.requested_by}</td>
-                      <td>{formatPHT(r.requested_at)}</td>
-                      <td>
-                        <StatusBadge status={r.status} />
+                      <td className={styles.itemsCell}>
+                        {g.items.map((i) => (
+                          <div key={i.id}>{i.requested_qty} {i.unit}</div>
+                        ))}
                       </td>
-                      <td className={styles.notesCell}>{r.notes || '—'}</td>
                       <td>
-                        {r.status === 'pending' && (
-                          <div className={styles.actions}>
-                            <button
-                              className={styles.approveBtn}
-                              disabled={actioningId === r.id}
-                              onClick={() => handleAction(r.id, 'approved')}
-                            >
-                              Approve
-                            </button>
-                            <button
-                              className={styles.rejectBtn}
-                              disabled={actioningId === r.id}
-                              onClick={() => handleAction(r.id, 'rejected')}
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        )}
-                        {r.status === 'approved' && (
-                          <button
-                            className={styles.fulfillBtn}
-                            disabled={actioningId === r.id}
-                            onClick={() => handleAction(r.id, 'fulfilled')}
-                          >
-                            Mark fulfilled
-                          </button>
-                        )}
+                        <StatusBadge status={g.status} />
                       </td>
+                      <td className={styles.notesCell}>{g.notes || '—'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -253,10 +280,8 @@ export default function PharmacyRequestsRecordsPage() {
         </div>
       </div>
 
-      {toast && (
-        <div className={styles.toast}>
-          <span style={{ fontSize: 14 }}>✓</span> {toast}
-        </div>
+      {openNotification && (
+        <RequestBatchModal notification={openNotification} onClose={() => setOpenNotification(null)} />
       )}
     </div>
   )
