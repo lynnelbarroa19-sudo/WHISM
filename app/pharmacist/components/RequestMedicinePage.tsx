@@ -1,37 +1,3 @@
-// RequestMedicinePage.tsx
-//
-// Reads/writes `pharmacy_requests` — the table Warehouse's
-// PharmacyRequestsRecordsPage reads from.
-//
-// Status vocabulary now matches Warehouse's current version:
-//   'pending' | 'confirm' | 'alerted' | 'rejected' | 'received'
-// (previously 'pending' | 'approved' | 'rejected' | 'fulfilled')
-//
-// Multi-item submissions now share one `request_batch_id` (generated once
-// per submission in submitRestockRequest()), so Warehouse can show them as
-// a single grouped popup instead of separate notifications. History
-// grouping here uses that same id when present, falling back to the old
-// same-minute heuristic only for legacy rows submitted before this change.
-//
-// `dosage` and `dosage_form` ("Type") are their own columns instead of
-// being folded into medicine_name/notes — the New Request form already
-// collects them separately, so this just stops throwing that detail away.
-//
-// UPDATED: fields now depend on the item's category.
-//   - Drugs:    Generic Name, Brand Name (optional), Dosage, Type, Unit, Qty
-//   - Supplies: Name, Type, Unit, Qty
-//   (Requested By and Reason stay as request-level fields, shared by all
-//   items in the request — that hasn't changed.)
-//
-// NOTE: this file assumes two small companion changes elsewhere, since
-// this page can't add columns/params on its own:
-//   1) `../lib/pharmacy` — RestockItem (or whatever local shape is passed
-//      to submitRestockRequest) needs an optional `brand` field alongside
-//      `medicine`/`dosage`/`type`/`unit`/`qty`/`category`.
-//   2) `../lib/pharmacyData` — submitRestockRequest() needs to insert the
-//      new `brand_name` column (drugs only — leave null for supplies),
-//      alongside the existing medicine_name/dosage/dosage_form insert.
-//   See the accompanying SQL for the new `brand_name` column.
 "use client";
 import { CSSProperties, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
@@ -164,6 +130,10 @@ export default function RequestMedicinePage({ onToast }: Props) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
 
+  // Which item's "Mark Received" button is currently mid-request — used
+  // to disable just that row's button (not the whole modal) while saving.
+  const [markingId, setMarkingId] = useState<string | null>(null);
+
   // Prefill "Requested By" from the logged-in account's auth metadata —
   // there's no separate `users` table, so username/email live on the
   // Supabase Auth user itself — but keep it editable.
@@ -202,6 +172,15 @@ export default function RequestMedicinePage({ onToast }: Props) {
       grouped.forEach(b => { b.status = batchStatus(b.items); });
       grouped.sort((a, b) => b.requested_at.localeCompare(a.requested_at));
       setBatches(grouped);
+
+      // Keep the open detail popup (if any) in sync with the freshly
+      // loaded data — otherwise its statuses/actions can go stale after
+      // a realtime update or after this component's own markReceived().
+      setSelected(prev => {
+        if (!prev) return prev;
+        const updated = grouped.find(b => b.key === prev.key);
+        return updated ?? prev;
+      });
     } catch (err: any) {
       onToast(err.message || "Failed to load request history.", "error");
     } finally {
@@ -211,8 +190,8 @@ export default function RequestMedicinePage({ onToast }: Props) {
 
   useEffect(() => { loadHistory(); }, []);
 
-  // Realtime — Warehouse confirming/alerting/rejecting/receiving shows up
-  // here live, no manual refresh needed.
+  // Realtime — Warehouse confirming/alerting/rejecting shows up here live,
+  // no manual refresh needed.
   useEffect(() => {
     const channel = supabase
       .channel("pharmacy_requests_pharmacist_view")
@@ -312,6 +291,46 @@ export default function RequestMedicinePage({ onToast }: Props) {
       onToast(err.message || "Failed to send request.", "error");
     } finally {
       setSaving(false);
+    }
+  };
+
+  /** Pharmacist clicks this after physically checking the delivered items
+   *  against a CONFIRMED request line — this is what flips that single
+   *  item's status to 'received'. That status change is exactly what the
+   *  DB trigger (fulfill_pharmacy_request_to_inventory) listens for to
+   *  create the real pharma_medicine_batches row(s) for this item, using
+   *  the actual warehouse batch/expiry (split across batches if needed).
+   *  Rejected/pending/alerted items never show this button — only
+   *  'confirm' does, matching the required flow (Warehouse confirms it
+   *  has stock -> Pharmacist checks the physical delivery -> THEN it
+   *  lands in the pharmacist's own inventory). */
+  const markReceived = async (itemId: string) => {
+    setMarkingId(itemId);
+    try {
+      const { error } = await supabase
+        .from("pharmacy_requests")
+        .update({ status: "received" })
+        .eq("id", itemId);
+      if (error) throw error;
+
+      onToast("Marked as received — added to inventory.", "success");
+
+      // Optimistically reflect the change in the open detail popup so the
+      // button disappears immediately instead of waiting for the realtime
+      // round-trip.
+      setSelected(prev => {
+        if (!prev) return prev;
+        const updatedItems = prev.items.map(it =>
+          it.id === itemId ? { ...it, status: "received" as RequestStatus } : it
+        );
+        return { ...prev, items: updatedItems, status: batchStatus(updatedItems) };
+      });
+
+      loadHistory();
+    } catch (err: any) {
+      onToast(err.message || "Failed to mark as received.", "error");
+    } finally {
+      setMarkingId(null);
     }
   };
 
@@ -440,7 +459,7 @@ export default function RequestMedicinePage({ onToast }: Props) {
               <th style={thStyle}>Date</th>
               <th style={thStyle}>Requested By</th>
               <th style={thStyle}>Items</th>
-              <th style={{ ...thStyle, textAlign: "right" }}>Total Qty</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>Quantity</th>
               <th style={{ ...thStyle, textAlign: "center" }}>Status</th>
             </tr>
           </thead>
@@ -475,8 +494,25 @@ export default function RequestMedicinePage({ onToast }: Props) {
                     )}
                   </div>
                 </td>
+                {/* Per-item quantity, one line per item — lines up with the
+                    Items column above instead of a single summed total, so
+                    a multi-item request (e.g. "Paracetamol / Paracetamol")
+                    shows each line's own qty ("1 Boxes" / "100 Pieces")
+                    right next to it, matching Warehouse's Pharmacy Requests
+                    table. */}
                 <td style={{ ...tdStyle, textAlign: "right", fontWeight: 800, color: t.text, verticalAlign: "top" }}>
-                  {b.items.reduce((s, it) => s + it.requested_qty, 0)}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                    {b.items.slice(0, 5).map(it => (
+                      <span key={it.id} style={{ whiteSpace: "nowrap" }}>
+                        {it.requested_qty} {it.unit}
+                      </span>
+                    ))}
+                    {b.items.length > 5 && (
+                      // Empty spacer line so this column's rows stay
+                      // vertically aligned with the "+N more" line in Items.
+                      <span>&nbsp;</span>
+                    )}
+                  </div>
                 </td>
                 <td style={{ ...tdStyle, textAlign: "center", verticalAlign: "top" }}><StatusPill status={b.status} /></td>
               </tr>
@@ -497,7 +533,7 @@ export default function RequestMedicinePage({ onToast }: Props) {
           <div
             onClick={e => e.stopPropagation()}
             style={{
-              background: t.cardBg, borderRadius: 16, width: "100%", maxWidth: 780,
+              background: t.cardBg, borderRadius: 16, width: "100%", maxWidth: 860,
               maxHeight: "84vh", overflow: "hidden", display: "flex", flexDirection: "column",
               boxShadow: "0 24px 60px rgba(0,0,0,0.35)", border: `2px solid ${DARK_GREEN}`,
             }}
@@ -535,6 +571,7 @@ export default function RequestMedicinePage({ onToast }: Props) {
                     <th style={{ ...thStyle, textAlign: "right" }}>Qty</th>
                     <th style={thStyle}>Notes</th>
                     <th style={{ ...thStyle, textAlign: "center" }}>Status</th>
+                    <th style={{ ...thStyle, textAlign: "center" }}>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -552,6 +589,22 @@ export default function RequestMedicinePage({ onToast }: Props) {
                       </td>
                       <td style={{ ...tdStyle, fontSize: 11.5 }}>{it.notes || "—"}</td>
                       <td style={{ ...tdStyle, textAlign: "center" }}><StatusPill status={it.status} /></td>
+                      <td style={{ ...tdStyle, textAlign: "center" }}>
+                        {it.status === "confirm" ? (
+                          <button
+                            disabled={markingId === it.id}
+                            onClick={() => markReceived(it.id)}
+                            style={{
+                              background: "#16a34a", color: "#fff", border: "none", borderRadius: 20,
+                              padding: "5px 14px", fontSize: 10.5, fontWeight: 800,
+                              cursor: markingId === it.id ? "not-allowed" : "pointer",
+                              fontFamily: "inherit", opacity: markingId === it.id ? 0.6 : 1, whiteSpace: "nowrap",
+                            }}
+                          >{markingId === it.id ? "Saving…" : "Mark Received"}</button>
+                        ) : (
+                          <span style={{ color: t.text3, fontSize: 11 }}>—</span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

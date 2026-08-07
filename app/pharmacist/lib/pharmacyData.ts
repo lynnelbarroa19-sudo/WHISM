@@ -172,20 +172,6 @@ export async function createMedicineWithBatch(input: {
   return medicine as Medicine;
 }
 
-/** Submit one or more items to Warehouse in a SINGLE insert. Writes into
- *  `pharmacy_requests` — NOT `pharma_restock_requests`. The Warehouse
- *  module's PharmacyRequestsRecordsPage / notification trigger already
- *  read/write `pharmacy_requests` with this exact shape.
- *
- *  All items share one `request_batch_id` (either the one passed in from
- *  the confirmation-dialog flow, or generated here if none was given) —
- *  this is what lets Warehouse's per-statement trigger fire exactly once
- *  for the whole request instead of once per item, and lets its "restock
- *  request" popup group every item under a single notification.
- *
- *  Dosage, type (dosage_form), and brand name each get their own column
- *  now instead of being folded into medicine_name/notes — notes holds
- *  ONLY the reason, so it displays correctly instead of showing "Type: X". */
 export async function submitRestockRequest(
   items: RestockItem[],
   pharmacistName: string,
