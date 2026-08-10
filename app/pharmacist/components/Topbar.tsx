@@ -92,32 +92,17 @@ export function Toast({ message, type, onDone }: Props) {
 }
 
 // ── Brand mark ────────────────────────────────────────────────────────────────
-// SMARTRHU wordmark: a small Rx-glyph mark + two-weight wordmark + a
-// "Pharmacy" role tag, so the brand reads clearly next to the other role
-// portals (Lab, Warehouse, etc.) that share this shell.
 function BrandMark() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-      <div style={{
-        width: 36, height: 36, borderRadius: 10, flexShrink: 0,
-        background: 'linear-gradient(135deg,#22c55e,#0d9488)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        boxShadow: '0 3px 10px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.25)',
-      }}>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2v-4M9 21H5a2 2 0 0 1-2-2v-4m0 0h18"/>
-        </svg>
-      </div>
+      
       <div style={{ lineHeight: 1.15 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 1 }}>
-          <span style={{ color: '#fff', fontSize: 17, fontWeight: 800, letterSpacing: '-0.01em' }}>SMART</span>
-          <span style={{ color: '#4ade80', fontSize: 17, fontWeight: 800, letterSpacing: '-0.01em' }}>RHU</span>
-        </div>
+       
         <div style={{
           fontSize: 9.5, fontWeight: 700, letterSpacing: 1.4, textTransform: 'uppercase',
           color: 'rgba(255,255,255,0.55)', marginTop: 1,
         }}>
-          Pharmacy
+         
         </div>
       </div>
     </div>
@@ -143,11 +128,44 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
   const profileRef = useRef<HTMLDivElement>(null)
   const notifRef   = useRef<HTMLDivElement>(null)
 
-  // displayNameRef now holds the MATCHING key used to filter
-  // pharmacy_requests.requested_by — NOT necessarily the same string shown
-  // in the UI. See fetchMatchName() below for why these can differ.
   const displayNameRef = useRef('')
   const readIdsRef = useRef<Set<string>>(new Set())
+
+  // Lazily-created AudioContext for the notification "ping" — created on
+  // first use rather than at mount, since some browsers refuse to start
+  // an AudioContext before any user interaction has happened on the page.
+  const audioCtxRef = useRef<AudioContext | null>(null)
+
+  /** Short synthesized "ping" — no audio file needed. Only called from the
+   *  two realtime postgres_changes handlers below, never from the initial
+   *  fetch functions, so it plays exactly once per genuinely NEW event
+   *  (prescription created, or restock status changed) and never on page
+   *  load / refresh / re-fetch of existing notifications. */
+  function playNotifSound() {
+    try {
+      if (typeof window === 'undefined') return
+      const Ctx = window.AudioContext || (window as any).webkitAudioContext
+      if (!Ctx) return
+      if (!audioCtxRef.current) audioCtxRef.current = new Ctx()
+      const ctx = audioCtxRef.current
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {})
+
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(880, ctx.currentTime)
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.18, ctx.currentTime + 0.01)
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35)
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start()
+      osc.stop(ctx.currentTime + 0.35)
+    } catch {
+      // Autoplay restrictions or no AudioContext support — fail silently,
+      // the visual badge/dropdown still works either way.
+    }
+  }
 
   // ── Fetch profile ──────────────────────────────────────────────────────────
   useEffect(() => { fetchProfile() }, [])
@@ -159,7 +177,10 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     const { data, error } = await supabase
       .from('users').select('username, email, avatar_url, role')
       .eq('user_id', uid).single()
-    if (error) { console.error('[Topbar] fetchProfile:', error); return }
+    if (error) {
+      console.error('[Topbar] fetchProfile:', error.message, '| code:', error.code, '| details:', error.details, '| hint:', error.hint)
+      return
+    }
     if (data) {
       setProfileName(data.username  || '')
       setProfileEmail(data.email    || '')
@@ -244,15 +265,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     }
   }
 
-  /** Restock requests — reads from `pharmacy_requests` (was pointed at a
-   *  nonexistent `restock_requests` table before, so this never returned
-   *  anything). `matchName` must be the SAME string RequestMedicinePage.tsx
-   *  wrote into `requested_by` when the request was submitted — see
-   *  fetchMatchName() for why that's not the same as the profile display
-   *  name. Notifies on any status OTHER than 'pending' (confirm / alerted
-   *  / rejected / received) — 'confirm' is the one the user specifically
-   *  asked for ("kapag na-confirm ng warehouse"), the rest come along for
-   *  free from the same query/subscription. */
   const fetchRestockNotifications = async (matchName: string) => {
     if (!matchName) return
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
@@ -277,14 +289,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     }
   }
 
-  /** Derives the SAME "requested_by" string RequestMedicinePage.tsx uses
-   *  when submitting a request — username, then full_name, then the email
-   *  prefix, straight from the auth session's user_metadata. This is
-   *  deliberately NOT `profileName` (which comes from the separate `users`
-   *  table and can read completely differently, e.g. "Ruth Poblete" vs.
-   *  the auth-metadata-derived "ruthaseradopoblete") — filtering restock
-   *  notifications by profileName silently matched nothing because the
-   *  two values are typically different strings for the same person. */
   const fetchMatchName = async (): Promise<string> => {
     const { data: { session } } = await supabase.auth.getSession()
     const authUser = session?.user
@@ -358,6 +362,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
           }
           const newNotif = buildPrescriptionNotif({ ...row, patients: patientRow })
           setNotifications(prev => mergeNotifs(prev, [newNotif]))
+          playNotifSound()
         }
       )
       .subscribe()
@@ -366,12 +371,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  /** Realtime restock status changes — fires the instant Warehouse flips a
-   *  pharmacy_requests row's status (confirm / alerted / rejected /
-   *  received) for THIS pharmacist's own request. Was subscribed to the
-   *  wrong table before (`restock_requests`, which Warehouse never writes
-   *  to); now points at `pharmacy_requests`, matched via the same
-   *  requested_by derivation as the initial fetch above. */
   useEffect(() => {
     const channel = supabase
       .channel('pharma_restock_status_notif')
@@ -388,6 +387,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
 
           const newNotif = buildRestockNotif(row)
           setNotifications(prev => mergeNotifs(prev, [newNotif]))
+          playNotifSound()
         }
       )
       .subscribe()
@@ -516,9 +516,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     </svg>
   )
 
-  /** Colors match the STATUS_MAP already used in RequestMedicinePage.tsx's
-   *  history table, so a notification's accent color reads consistently
-   *  with the status pill the pharmacist sees when they open the request. */
   function restockAccent(status?: RestockStatus): string {
     if (status === 'confirm')  return '#2563eb'
     if (status === 'received') return '#16a34a'
@@ -533,9 +530,23 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     { icon: <IconSettings />, label: 'Settings',        action: () => goTo('settings', 'profile')  },
   ]
 
+  const [headerHeight, setHeaderHeight] = useState(132) // fallback lang habang di pa naka-measure
+
+useEffect(() => {
+  const el = document.getElementById('phar-sidebar-logo-block')
+  if (!el) return
+
+  const update = () => setHeaderHeight(el.getBoundingClientRect().height)
+  update()
+
+  const ro = new ResizeObserver(update)
+  ro.observe(el)
+  return () => ro.disconnect()
+}, [])
+
   return (
     <header style={{
-      background: 'linear-gradient(90deg,#173617,#1b3a1b 55%,#173617)', height: 64,
+       background: 'linear-gradient(90deg,#173617,#1b3a1b 55%,#173617)', height: headerHeight,
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       padding: '0 24px', position: 'sticky', top: 0, zIndex: 40,
       boxShadow: '0 1px 6px rgba(0,0,0,0.25)', gap: 16,
@@ -544,10 +555,8 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
 
       <BrandMark />
 
-      {/* ── Right section ── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
 
-        {/* Clock */}
         <div style={{
           color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: 700,
           letterSpacing: 0.5, whiteSpace: 'nowrap',
@@ -564,7 +573,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
 
         <div style={{ width: 1, height: 26, background: 'rgba(255,255,255,0.12)', flexShrink: 0 }} />
 
-        {/* ── Notification bell ── */}
         <div ref={notifRef} style={{ position: 'relative' }}>
           <button
             onClick={() => setShowNotif(p => !p)}
@@ -594,7 +602,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
               boxShadow: '0 8px 32px rgba(0,0,0,0.18)', overflow: 'hidden', zIndex: 100,
               animation: 'fadeDown 0.15s ease', border: '1px solid rgba(0,0,0,0.04)',
             }}>
-              {/* Header */}
               <div style={{
                 padding: '14px 16px', borderBottom: '1px solid #f0fdf4',
                 display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -619,7 +626,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
                 )}
               </div>
 
-              {/* Notification list */}
               <div style={{ maxHeight: 340, overflowY: 'auto' }}>
                 {notifications.length === 0 ? (
                   <div style={{
@@ -651,7 +657,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
                         onMouseEnter={e => (e.currentTarget.style.background = '#dcfce7')}
                         onMouseLeave={e => (e.currentTarget.style.background = n.read ? 'transparent' : '#f0fdf4')}
                       >
-                        {/* Unread dot */}
                         <div style={{
                           width: 8, height: 8, borderRadius: '50%', flexShrink: 0, marginTop: 4,
                           background: n.read ? '#d1d5db' : accent,
@@ -664,7 +669,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
                             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                           }}>{n.sub}</div>
                         </div>
-                        {/* Kind icon */}
                         {n.kind === 'restock' ? <IconBox color={accent} /> : <IconRx />}
                       </div>
                     )
@@ -675,7 +679,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
           )}
         </div>
 
-        {/* ── Dark mode ── */}
         <button onClick={toggle} style={iconBtn}
           onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.2)')}
           onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.1)')}>
@@ -695,7 +698,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
 
         <div style={{ width: 1, height: 26, background: 'rgba(255,255,255,0.12)', flexShrink: 0 }} />
 
-        {/* ── User pill + dropdown ── */}
         <div ref={profileRef} style={{ position: 'relative' }}>
           <div onClick={() => setShowProfile(p => !p)} style={{
             display: 'flex', alignItems: 'center', gap: 9,
@@ -785,7 +787,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
         </div>
       </div>
 
-      {/* ── Logout Confirmation Modal (standardized 400px / 16px header) ── */}
       {showLogoutModal && (
         <div
           onClick={() => setShowLogoutModal(false)}
@@ -806,7 +807,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
               boxShadow: '0 20px 60px rgba(0,0,0,0.25)',
             }}
           >
-            {/* Modal header */}
             <div style={{
               background: t.green,
               padding: '16px 20px',
@@ -830,7 +830,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
               </button>
             </div>
 
-            {/* Modal body */}
             <div style={{
               padding: '32px 24px 24px',
               display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
@@ -857,7 +856,6 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
                 </div>
               </div>
 
-              {/* Buttons */}
               <div style={{ display: 'flex', gap: 12, width: '100%', marginTop: 8 }}>
                 <button
                   onClick={() => setShowLogoutModal(false)}

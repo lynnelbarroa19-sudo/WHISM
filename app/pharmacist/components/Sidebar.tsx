@@ -321,30 +321,25 @@ export default function Sidebar({ active, setActive, collapsed, onToggleCollapse
         }}>
           <div style={{ position: "absolute", top: -80, right: -80, width: 220, height: 220, borderRadius: "50%", background: darkMode ? "radial-gradient(circle, rgba(26,122,26,0.14) 0%, transparent 70%)" : "radial-gradient(circle, rgba(34,197,94,0.1) 0%, transparent 70%)", pointerEvents: "none" }} />
           <div style={{ position: "absolute", bottom: 80, left: -60, width: 180, height: 180, borderRadius: "50%", background: darkMode ? "radial-gradient(circle, rgba(46,168,46,0.08) 0%, transparent 70%)" : "radial-gradient(circle, rgba(26,122,26,0.07) 0%, transparent 70%)", pointerEvents: "none" }} />
+<div id="phar-sidebar-logo-block" style={{ padding: "10px 14px 8px", borderBottom: `1px solid ${C.border}`, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, overflow: "hidden", position: "relative" }}>
+  <div style={{
+    width: collapsed ? 32 : 38, height: collapsed ? 32 : 38, borderRadius: collapsed ? 10 : 12, flexShrink: 0,
+    background: `linear-gradient(135deg, ${C.green}, ${C.mint})`,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    boxShadow: darkMode ? "0 3px 10px rgba(26,122,26,0.5), inset 0 1px 0 rgba(255,255,255,0.15)" : "0 3px 10px rgba(26,122,26,0.28), inset 0 1px 0 rgba(255,255,255,0.25)",
+    overflow: "hidden", position: "relative", transition: "width 0.25s ease, height 0.25s ease, border-radius 0.25s ease",
+  }}>
+    <img src="/rhulogo.png" alt="MHO Logo" style={{ width: "100%", height: "100%", objectFit: "cover", position: "relative", zIndex: 2 }} onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />
+    <Activity size={collapsed ? 15 : 17} color="#ffffff" strokeWidth={2.5} style={{ position: "absolute", zIndex: 0 }} />
+  </div>
 
-          <div style={{ padding: "18px 14px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 12, overflow: "hidden", position: "relative" }}>
-            <div style={{
-              width: 44, height: 44, borderRadius: 13, flexShrink: 0,
-              background: `linear-gradient(135deg, ${C.green}, ${C.mint})`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              boxShadow: darkMode ? "0 4px 16px rgba(26,122,26,0.55), inset 0 1px 0 rgba(255,255,255,0.15)" : "0 4px 16px rgba(26,122,26,0.3),  inset 0 1px 0 rgba(255,255,255,0.25)",
-              overflow: "hidden", position: "relative",
-            }}>
-              <img src="/logo.jpg" alt="MHO Logo" style={{ width: 44, height: 44, borderRadius: 13, objectFit: "cover", position: "relative", zIndex: 1 }} onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />
-              <Activity size={20} color="#ffffff" strokeWidth={2.5} style={{ position: "absolute", zIndex: 0 }} />
-            </div>
-
-            {!collapsed && (
-              <div className="phar-slide-in" style={{ overflow: "hidden", minWidth: 0 }}>
-                <div style={{ display: "inline-flex", alignItems: "center", gap: 5, background: darkMode ? "rgba(74,222,128,0.14)" : C.greenLight, border: `1px solid ${darkMode ? "rgba(74,222,128,0.25)" : "rgba(22,163,74,0.25)"}`, borderRadius: 20, padding: "2px 8px", marginBottom: 4 }}>
-                  <span style={{ width: 5, height: 5, borderRadius: "50%", background: C.green, flexShrink: 0 }} />
-                  <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 1.2, color: darkMode ? C.mint : C.greenMid, textTransform: "uppercase" }}>Pharmacy Portal</span>
-                </div>
-                <div style={{ fontFamily: "'Nunito', sans-serif", fontWeight: 800, fontSize: 15, letterSpacing: 0.1, lineHeight: 1.3, color: darkMode ? C.mint : C.green }}>Rural Healthcare Unit</div>
-                <div style={{ fontSize: 11, fontWeight: 600, color: C.text3, marginTop: 1 }}>Lopez, Quezon</div>
-              </div>
-            )}
-          </div>
+  {!collapsed && (
+    <div className="phar-slide-in" style={{ overflow: "hidden", minWidth: 0, textAlign: "center" }}>
+      <div style={{ fontFamily: "'Nunito', sans-serif", fontWeight: 800, fontSize: 12, letterSpacing: 0.1, lineHeight: 1.2, color: darkMode ? C.mint : C.green }}>Rural Healthcare Unit</div>
+      <div style={{ fontSize: 9, fontWeight: 600, color: C.text3, marginTop: 0 }}>Lopez, Quezon</div>
+    </div>
+  )}
+</div>
 
           <nav style={{ padding: "14px 10px 0", flex: 1, position: "relative", zIndex: 1 }}>
             {!collapsed && <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: C.text3, marginBottom: 8, paddingLeft: 6 }}>Menu</div>}
