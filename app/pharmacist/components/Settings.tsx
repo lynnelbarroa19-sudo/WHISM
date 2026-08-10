@@ -120,7 +120,8 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
 
   const [tab, setTab] = useState<Tab>(initialTab ?? "profile");
   const [photo, setPhoto] = useState<string | null>(null);
-  const [username, setUsername] = useState("");
+ const [firstName,  setFirstName]  = useState("");
+const [lastName,   setLastName]   = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("pharmacist");
   const [saving, setSaving] = useState(false);
@@ -181,21 +182,26 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
   }, []);
 
   const fetchProfile = async (uid: string) => {
-    const { data, error } = await supabase
-      .from("users")
-      .select("username, email, avatar_url, role, notification_prefs")
-      .eq("user_id", uid)
-      .single();
-    if (error) { showToast("Failed to load profile.", "error"); return; }
-    if (data) {
-      setUsername(data.username || "");
-      setEmail(data.email || "");
-      setRole(data.role || "pharmacist");
-      if (data.avatar_url) setPhoto(`${data.avatar_url}?t=${Date.now()}`);
-      setPrefs({ ...DEFAULT_PREFS, ...(data.notification_prefs || {}) });
-      setPrefsLoaded(true);
-    }
-  };
+  const { data, error } = await supabase
+    .from("users")
+    .select("first_name, last_name, email, avatar_url, role, notification_prefs")
+    .eq("user_id", uid)
+    .single();
+  if (error) {
+    console.error('[Settings] fetchProfile:', error.message, '| code:', error.code, '| details:', error.details, '| hint:', error.hint);
+    showToast("Failed to load profile.", "error");
+    return;
+  }
+  if (data) {
+    setFirstName(data.first_name || "");
+    setLastName(data.last_name || "");
+    setEmail(data.email || "");
+    setRole(data.role || "pharmacist");
+    if (data.avatar_url) setPhoto(`${data.avatar_url}?t=${Date.now()}`);
+    setPrefs({ ...DEFAULT_PREFS, ...(data.notification_prefs || {}) });
+    setPrefsLoaded(true);
+  }
+};
 
   const showToast = (msg: string, type: "success" | "error") => {
     setToast(msg); setToastType(type);
@@ -270,19 +276,33 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
   };
 
   const handleSaveProfile = async () => {
-    if (!username.trim()) { showToast("Please enter a username.", "error"); return; }
-    if (!email.trim()) { showToast("Please enter an email.", "error"); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast("Please enter a valid email.", "error"); return; }
-    if (!userId) { showToast("User not found. Please refresh.", "error"); return; }
+  if (!firstName.trim()) { showToast("Please enter a first name.", "error"); return; }
+  if (!lastName.trim()) { showToast("Please enter a last name.", "error"); return; }
+  if (!email.trim()) { showToast("Please enter an email.", "error"); return; }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast("Please enter a valid email.", "error"); return; }
+  if (!userId) { showToast("User not found. Please refresh.", "error"); return; }
 
-    setSaving(true);
-    const { error } = await supabase.from("users").update({ username: username.trim(), email: email.trim() }).eq("user_id", userId);
-    setSaving(false);
+  setSaving(true);
+const { data, error } = await supabase.from("users").update({
+  first_name: firstName.trim(),
+  last_name: lastName.trim(),
+  email: email.trim(),
+}).eq("user_id", userId).select();
+setSaving(false);
 
-    if (error) { showToast("Error saving profile!", "error"); return; }
-    window.dispatchEvent(new Event("profileUpdated"));
-    showToast("Profile saved successfully!", "success");
-  };
+if (error) {
+  console.error('[Settings] handleSaveProfile:', error.message, '| code:', error.code, '| details:', error.details, '| hint:', error.hint);
+  showToast(error.message || "Error saving profile!", "error");
+  return;
+}
+if (!data || data.length === 0) {
+  console.error('[Settings] handleSaveProfile: update matched 0 rows — likely blocked by a Row Level Security policy on "users" for UPDATE.');
+  showToast("Save didn't actually apply — you may not have permission to edit this record (RLS).", "error");
+  return;
+}
+window.dispatchEvent(new Event("profileUpdated"));
+showToast("Profile saved successfully!", "success");
+};
 
   const handleChangePassword = async () => {
     if (!currentPw) { showToast("Please enter your current password.", "error"); return; }
@@ -333,7 +353,8 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
     color: active ? "#fff" : t.text, textAlign: "left", transition: "background 0.15s", marginBottom: 4,
   });
 
-  const initials = (username || authUser?.name || "P").split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2);
+ const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2);
   const roleLabel = role ? role.charAt(0).toUpperCase() + role.slice(1) : "Pharmacist";
 
   if (isLoading) return (
@@ -362,7 +383,7 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
                 : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 700, color: t.greenLight }}>{initials}</div>}
             </div>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: t.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{username || authUser.name || "Pharmacist"}</div>
+             <div style={{ fontSize: 13, fontWeight: 700, color: t.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{fullName || authUser.name || "Pharmacist"}</div>
               <div style={{ fontSize: 11, color: t.text3 }}>{roleLabel}</div>
             </div>
           </div>
@@ -437,15 +458,19 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px 24px", marginBottom: 20 }}>
-                  <div>
-                    <label style={labelStyle}>Username</label>
-                    <input type="text" value={username} onChange={e => setUsername(e.target.value)} placeholder="Enter username" style={inputStyle} autoComplete="off" name="profile-username" />
-                  </div>
-                  <div>
-                    <label style={labelStyle}>Email</label>
-                    <input type="text" value={email} onChange={e => setEmail(e.target.value)} placeholder="Enter email" style={inputStyle} autoComplete="off" name="profile-email" />
-                  </div>
-                </div>
+  <div>
+    <label style={labelStyle}>First Name</label>
+    <input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} placeholder="Enter first name" style={inputStyle} autoComplete="off" name="profile-first-name" />
+  </div>
+  <div>
+    <label style={labelStyle}>Last Name</label>
+    <input type="text" value={lastName} onChange={e => setLastName(e.target.value)} placeholder="Enter last name" style={inputStyle} autoComplete="off" name="profile-last-name" />
+  </div>
+  <div>
+    <label style={labelStyle}>Email</label>
+    <input type="text" value={email} onChange={e => setEmail(e.target.value)} placeholder="Enter email" style={inputStyle} autoComplete="off" name="profile-email" />
+  </div>
+</div>
 
                 <div style={{ marginBottom: 32 }}>
                   <label style={labelStyle}>Role</label>

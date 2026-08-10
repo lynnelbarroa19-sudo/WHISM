@@ -545,13 +545,16 @@ useEffect(() => {
 }, [])
 
   return (
-    <header style={{
-       background: 'linear-gradient(90deg,#173617,#1b3a1b 55%,#173617)', height: headerHeight,
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '0 24px', position: 'sticky', top: 0, zIndex: 40,
-      boxShadow: '0 1px 6px rgba(0,0,0,0.25)', gap: 16,
-      borderBottom: '1px solid rgba(74,222,128,0.18)',
-    }}>
+   <header style={{
+  background: dark
+    ? 'linear-gradient(90deg,#03110a,#08200f 55%,#03110a)'
+    : 'linear-gradient(90deg,#173617,#1b3a1b 55%,#173617)',
+  height: headerHeight,
+  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+  padding: '0 24px', position: 'sticky', top: 0, zIndex: 40,
+  boxShadow: '0 1px 6px rgba(0,0,0,0.25)', gap: 16,
+  borderBottom: dark ? '1px solid rgba(74,222,128,0.1)' : '1px solid rgba(74,222,128,0.18)',
+}}>
 
       <BrandMark />
 

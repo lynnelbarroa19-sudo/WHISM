@@ -210,7 +210,7 @@ export default function DispenseMedicinePage({ onToast }: Props) {
           </span>
           <input
             value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Search by patient name or medicine…"
+            placeholder="Search…"
             style={{
               width: "100%", boxSizing: "border-box", padding: "9px 34px 9px 32px",
               borderRadius: 8, border: `1.5px solid ${t.border}`, fontSize: 12.5,
