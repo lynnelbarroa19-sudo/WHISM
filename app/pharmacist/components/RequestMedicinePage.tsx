@@ -133,7 +133,7 @@ export default function RequestMedicinePage({ onToast }: Props) {
   // Which item's "Mark Received" button is currently mid-request — used
   // to disable just that row's button (not the whole modal) while saving.
   const [markingId, setMarkingId] = useState<string | null>(null);
-
+const [qtyText, setQtyText] = useState("1");
   // Prefill "Requested By" from the logged-in account's auth metadata —
   // there's no separate `users` table, so username/email live on the
   // Supabase Auth user itself — but keep it editable.
@@ -204,11 +204,26 @@ export default function RequestMedicinePage({ onToast }: Props) {
 
   const set = (k: keyof ItemDraft, v: string | number) => setDraft(d => ({ ...d, [k]: v }));
 
-  /** Clamps to a positive integer — typing "-", "0", or letters can't sneak through. */
-  const setQty = (raw: string) => {
+  /** Lets the Qty field be freely edited — including temporarily empty
+ *  while backspacing — instead of forcing it back to 1 on every
+ *  keystroke. draft.qty only updates when the text is a valid number;
+ *  validation to a real minimum of 1 happens separately on blur. */
+const handleQtyChange = (raw: string) => {
+  if (raw === "" || /^\d+$/.test(raw)) {
+    setQtyText(raw);
     const n = parseInt(raw, 10);
-    set("qty", !Number.isFinite(n) || n < 1 ? 1 : n);
-  };
+    if (Number.isFinite(n)) set("qty", n);
+  }
+};
+
+/** On leaving the field: snap back to a valid minimum (1) if it was
+ *  left empty or invalid — this is the actual validation step. */
+const handleQtyBlur = () => {
+  const n = parseInt(qtyText, 10);
+  const clamped = !Number.isFinite(n) || n < 1 ? 1 : n;
+  setQtyText(String(clamped));
+  set("qty", clamped);
+};
 
   /** Switching category clears the fields that don't apply to the new
    *  category — brand/dosage are drugs-only, so a stale value can't sneak
@@ -233,15 +248,17 @@ export default function RequestMedicinePage({ onToast }: Props) {
       dosage: itemCategory === "drugs" ? draft.dosage : "",
     }]);
     setDraft({ ...EMPTY_DRAFT, category: itemCategory, unit: draft.unit });
+setQtyText("1");
   };
   const removeItem = (i: number) => setItems(prev => prev.filter((_, idx) => idx !== i));
 
   const resetForm = () => {
-    setItems([]);
-    setDraft(EMPTY_DRAFT);
-    setItemCategory("drugs");
-    setReason("");
-  };
+  setItems([]);
+  setDraft(EMPTY_DRAFT);
+  setItemCategory("drugs");
+  setReason("");
+  setQtyText("1");
+};
 
   /** X button / backdrop click never closes directly — always confirm first
    *  if there's anything the pharmacist would lose. */
@@ -413,7 +430,7 @@ export default function RequestMedicinePage({ onToast }: Props) {
           </span>
           <input
             value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Search item, brand, or requester..."
+            placeholder="Search..."
             style={{
               width: "100%", boxSizing: "border-box", padding: "9px 34px 9px 32px",
               borderRadius: 8, border: `1.5px solid ${t.inputBorder}`, fontSize: 12.5,
@@ -715,10 +732,11 @@ export default function RequestMedicinePage({ onToast }: Props) {
                   </div>
                   <div>
                     <label style={lbl}>Qty ({draft.unit})</label>
-                    <input type="number" min={1} step={1} value={draft.qty}
-                      onChange={e => setQty(e.target.value)}
-                      onKeyDown={e => { if (e.key === "-" || e.key === "e") e.preventDefault(); }}
-                      style={inp} />
+                    <input type="number" min={1} step={1} value={qtyText}
+  onChange={e => handleQtyChange(e.target.value)}
+  onBlur={handleQtyBlur}
+  onKeyDown={e => { if (e.key === "-" || e.key === "e") e.preventDefault(); }}
+  style={inp} />
                   </div>
                 </div>
               </div>

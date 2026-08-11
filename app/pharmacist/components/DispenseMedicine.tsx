@@ -556,7 +556,7 @@ export function DispenseItemsModal({ medicines, onClose, onSaved, onToast }: Dis
         boxShadow: "0 24px 60px rgba(0,0,0,0.4)", overflow: "hidden",
       }}>
         <div style={{ background: `linear-gradient(135deg, ${DARK_GREEN}, ${t.green})`, padding: "16px 22px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
-          <div style={{ color: "#fff", fontSize: 15, fontWeight: 900 }}>Dispense Medicine</div>
+          <div style={{ color: "#fff", fontSize: 15, fontWeight: 900 }}>DISPENSE MEDICINE</div>
           <button onClick={onClose} style={{ border: "1px solid rgba(255,255,255,0.5)", background: "rgba(255,255,255,0.15)", color: "#fff", borderRadius: 8, width: 30, height: 30, cursor: "pointer", fontSize: 15, fontWeight: 800 }}>✕</button>
         </div>
 

@@ -254,7 +254,7 @@ export default function AddMedicinePage({ onToast, onClose, onSaved, defaultTab 
       }}>
         <div>
           <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.8)", fontWeight: 800, textTransform: "uppercase", letterSpacing: 1.4, marginBottom: 3 }}>Pharmacist</div>
-          <div style={{ fontSize: onClose ? 20 : 26, fontWeight: 900, color: "#fff", lineHeight: 1 }}>Add Medicine</div>
+          <div style={{ fontSize: onClose ? 20 : 26, fontWeight: 900, color: "#fff", lineHeight: 1 }}>ADD MEDICINE</div>
         </div>
         {onClose && (
           <button onClick={requestClose} style={{

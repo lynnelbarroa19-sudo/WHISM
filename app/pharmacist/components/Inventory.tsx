@@ -31,7 +31,7 @@ type Props = {
   onMedicineAdded?: () => void;
 };
 
-type Tab = "drugs" | "supplies";
+type Tab = "all" | "drugs" | "supplies";
 type StockLevelFilter = "all" | "high" | "medium" | "low" | "out";
 type ExpiryFilter = "all" | "expiring" | "expired";
 
@@ -320,7 +320,7 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
   const [showExport, setShowExport] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingBatch, setEditingBatch] = useState<BatchRow | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("drugs");
+  const [activeTab, setActiveTab] = useState<Tab>("all");
   const [showArchived, setShowArchived] = useState(false);
   const [search, setSearch] = useState("");
   const [stockFilter, setStockFilter] = useState<StockLevelFilter>("all");
@@ -447,8 +447,8 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
     return true;
   };
 
-  const activeBatchRows = batchRows
-    .filter(b => b.pharma_medicines?.category === activeTab)
+ const activeBatchRows = batchRows
+  .filter(b => activeTab === "all" || b.pharma_medicines?.category === activeTab)
     .filter(b => matchesStockFilter(b.total_quantity))
     .filter(b => matchesExpiryFilter(b.expiration_date))
     .filter(b => !search
@@ -461,7 +461,7 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
 
   const drugCount = medicines.filter(m => m.category === "drugs").length;
   const supplyCount = medicines.filter(m => m.category === "supplies").length;
-  const tabLabel = activeTab === "drugs" ? "Medicine Drugs" : "Medicine Supplies";
+ const tabLabel = activeTab === "all" ? "All Medicines" : activeTab === "drugs" ? "Medicine Drugs" : "Medicine Supplies";
 
   const uniqueMedicineIds = Array.from(new Set(activeBatchRows.map(b => b.medicine_id)));
   const toggleAll = () => setSelected(s => s.length === uniqueMedicineIds.length ? [] : uniqueMedicineIds);
@@ -491,97 +491,105 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
         </div>
       </div>
 
-      {/* Filter bar */}
-      <div style={{ background: t.cardBg, borderRadius: 14, padding: "16px 20px", marginBottom: 16, boxShadow: "0 2px 12px rgba(0,0,0,0.05)", border: `1px solid ${t.cardBorder}` }}>
-        <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
-          <div style={{ position: "relative", flex: 1, minWidth: 220 }}>
-            <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: t.text2, display: "flex" }}><Search size={14} /></span>
-            <input
-              value={search} onChange={e => setSearch(e.target.value)}
-              placeholder="Search generic name, batch no., storage..."
-              style={{ width: "100%", boxSizing: "border-box", padding: "9px 34px 9px 32px", borderRadius: 8, border: `1.5px solid ${t.border}`, fontSize: 12.5, outline: "none", color: t.text, background: t.surface2 }}
-            />
-            {search && (
-              <button onClick={() => setSearch("")} style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: t.text2, display: "flex", padding: 0 }}>
-                <X size={14} />
-              </button>
-            )}
-          </div>
+  {/* Filter bar */}
+<div style={{ background: t.cardBg, borderRadius: 14, padding: "16px 20px", marginBottom: 16, boxShadow: "0 2px 12px rgba(0,0,0,0.05)", border: `1px solid ${t.cardBorder}` }}>
 
-          <select value={stockFilter} onChange={e => setStockFilter(e.target.value as StockLevelFilter)} style={{
-            padding: "8px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700, border: `1.5px solid ${t.border}`, background: t.surface2, color: t.text, cursor: "pointer",
-          }}>
-            <option value="all">All Stock Levels</option>
-            <option value="high">High (50+)</option>
-            <option value="medium">Medium (11–50)</option>
-            <option value="low">Low (1–10)</option>
-            <option value="out">Out of Stock</option>
-          </select>
-          <select value={expiryFilter} onChange={e => setExpiryFilter(e.target.value as ExpiryFilter)} style={{
-            padding: "8px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700, border: `1.5px solid ${t.border}`, background: t.surface2, color: t.text, cursor: "pointer",
-          }}>
-            <option value="all">All Expiry</option>
-            <option value="expiring">Expiring ≤30 days</option>
-            <option value="expired">Expired</option>
-          </select>
-          {activeExtraFilterCount > 0 && (
-            <button onClick={() => { setStockFilter("all"); setExpiryFilter("all"); }} style={{ border: "none", background: "transparent", color: "#dc2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
-              <X size={12} /> Clear
-            </button>
-          )}
+  {/* Row 1 — Search (stretches full width) + Export */}
+  <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center" }}>
+    <div style={{ position: "relative", flex: 1 }}>
+      <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: t.text2, display: "flex" }}><Search size={14} /></span>
+      <input
+        value={search} onChange={e => setSearch(e.target.value)}
+        placeholder="Search..."
+        style={{ width: "100%", boxSizing: "border-box", padding: "9px 34px 9px 32px", borderRadius: 8, border: `1.5px solid ${t.border}`, fontSize: 12.5, outline: "none", color: t.text, background: t.surface2 }}
+      />
+      {search && (
+        <button onClick={() => setSearch("")} style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: t.text2, display: "flex", padding: 0 }}>
+          <X size={14} />
+        </button>
+      )}
+    </div>
 
-          <div style={{ position: "relative", marginLeft: "auto" }}>
-            <button onClick={() => setShowExport(v => !v)} style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, border: `1.5px solid ${t.border}`, background: t.cardBg, color: t.green, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
-              <Download size={13} /> Export
-            </button>
-            {showExport && (
-              <div style={{ position: "absolute", right: 0, top: "110%", background: t.cardBg, border: `1px solid ${t.border}`, borderRadius: 8, zIndex: 99, minWidth: 170, boxShadow: "0 4px 16px rgba(0,0,0,0.12)", overflow: "hidden" }}>
-                <button onClick={() => { exportToExcel(activeBatchRows, tabLabel); setShowExport(false); }} style={{ width: "100%", padding: "10px 14px", textAlign: "left", border: "none", background: "transparent", cursor: "pointer", fontSize: 13, color: t.text, fontWeight: 600 }}>Download as Excel</button>
-                <button onClick={() => { exportToPDF(activeBatchRows, tabLabel); setShowExport(false); }} style={{ width: "100%", padding: "10px 14px", textAlign: "left", border: "none", background: "transparent", cursor: "pointer", fontSize: 13, color: t.text, fontWeight: 600 }}>Download as PDF</button>
-              </div>
-            )}
-          </div>
+    <div style={{ position: "relative", flexShrink: 0 }}>
+      <button onClick={() => setShowExport(v => !v)} style={{ padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 800, border: `1.5px solid ${t.border}`, background: t.cardBg, color: t.green, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+        <Download size={13} /> Export
+      </button>
+      {showExport && (
+        <div style={{ position: "absolute", right: 0, top: "110%", background: t.cardBg, border: `1px solid ${t.border}`, borderRadius: 8, zIndex: 99, minWidth: 170, boxShadow: "0 4px 16px rgba(0,0,0,0.12)", overflow: "hidden" }}>
+          <button onClick={() => { exportToExcel(activeBatchRows, tabLabel); setShowExport(false); }} style={{ width: "100%", padding: "10px 14px", textAlign: "left", border: "none", background: "transparent", cursor: "pointer", fontSize: 13, color: t.text, fontWeight: 600 }}>Download as Excel</button>
+          <button onClick={() => { exportToPDF(activeBatchRows, tabLabel); setShowExport(false); }} style={{ width: "100%", padding: "10px 14px", textAlign: "left", border: "none", background: "transparent", cursor: "pointer", fontSize: 13, color: t.text, fontWeight: 600 }}>Download as PDF</button>
         </div>
+      )}
+    </div>
+  </div>
 
-        {/* Pill tabs */}
-        <div style={{ display: "flex", gap: 3, background: t.surface2, borderRadius: 24, padding: 3, border: `1px solid ${t.border}`, marginBottom: 10, width: "fit-content" }}>
-          {[{ tab: "drugs" as Tab, label: "Drugs", count: drugCount }, { tab: "supplies" as Tab, label: "Supplies", count: supplyCount }].map(({ tab, label, count }) => {
-            const active = activeTab === tab && !showArchived;
-            return (
-              <button key={tab} onClick={() => { setActiveTab(tab); setShowArchived(false); }} style={{
-                padding: "6px 16px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: "none", cursor: "pointer",
-                background: active ? t.green : "transparent", color: active ? "#fff" : t.text2,
-                display: "flex", alignItems: "center", gap: 6,
-              }}>
-                {label}
-                <span style={{ background: active ? "rgba(255,255,255,0.25)" : t.border, color: active ? "#fff" : t.text2, borderRadius: 20, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>{count}</span>
-              </button>
-            );
-          })}
-          <button onClick={() => setShowArchived(v => !v)} style={{
+  {/* Row 2 — Pill tabs + Stock/Expiry filters + Select All, all together */}
+  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+    <div style={{ display: "flex", gap: 3, background: t.surface2, borderRadius: 24, padding: 3, border: `1px solid ${t.border}`, width: "fit-content" }}>
+     {[
+  { tab: "all" as Tab, label: "All", count: drugCount + supplyCount },
+  { tab: "drugs" as Tab, label: "Drugs", count: drugCount },
+  { tab: "supplies" as Tab, label: "Supplies", count: supplyCount },
+].map(({ tab, label, count }) => {
+        const active = activeTab === tab && !showArchived;
+        return (
+          <button key={tab} onClick={() => { setActiveTab(tab); setShowArchived(false); }} style={{
             padding: "6px 16px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: "none", cursor: "pointer",
-            background: showArchived ? "#6b7280" : "transparent", color: showArchived ? "#fff" : t.text2,
+            background: active ? t.green : "transparent", color: active ? "#fff" : t.text2,
             display: "flex", alignItems: "center", gap: 6,
           }}>
-            <ArchiveIcon size={13} /> Archived
-            <span style={{ background: showArchived ? "rgba(255,255,255,0.25)" : t.border, color: showArchived ? "#fff" : t.text2, borderRadius: 20, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>{archivedMeds.length + archivedBatches.length}</span>
+            {label}
+            <span style={{ background: active ? "rgba(255,255,255,0.25)" : t.border, color: active ? "#fff" : t.text2, borderRadius: 20, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>{count}</span>
           </button>
-        </div>
+        );
+      })}
+      <button onClick={() => setShowArchived(v => !v)} style={{
+        padding: "6px 16px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: "none", cursor: "pointer",
+        background: showArchived ? "#6b7280" : "transparent", color: showArchived ? "#fff" : t.text2,
+        display: "flex", alignItems: "center", gap: 6,
+      }}>
+        <ArchiveIcon size={13} /> Archived
+        <span style={{ background: showArchived ? "rgba(255,255,255,0.25)" : t.border, color: showArchived ? "#fff" : t.text2, borderRadius: 20, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>{archivedMeds.length + archivedBatches.length}</span>
+      </button>
+    </div>
 
-        {!showArchived && (
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: t.text2, cursor: "pointer", padding: "5px 14px", borderRadius: 20, border: `1.5px solid ${t.border}` }}>
-              <input type="checkbox" checked={uniqueMedicineIds.length > 0 && selected.length === uniqueMedicineIds.length} onChange={toggleAll} style={{ accentColor: t.green, width: 12, height: 12 }} />
-              Select All
-            </label>
-            {selected.length > 0 && (
-              <button onClick={archiveSelected} style={{ padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: "none", background: t.green, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
-                <ArchiveIcon size={12} /> Archive ({selected.length})
-              </button>
-            )}
-          </div>
+    <select value={stockFilter} onChange={e => setStockFilter(e.target.value as StockLevelFilter)} style={{
+      padding: "8px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700, border: `1.5px solid ${t.border}`, background: t.surface2, color: t.text, cursor: "pointer",
+    }}>
+      <option value="all">All Stock Levels</option>
+      <option value="high">High (50+)</option>
+      <option value="medium">Medium (11–50)</option>
+      <option value="low">Low (1–10)</option>
+      <option value="out">Out of Stock</option>
+    </select>
+    <select value={expiryFilter} onChange={e => setExpiryFilter(e.target.value as ExpiryFilter)} style={{
+      padding: "8px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700, border: `1.5px solid ${t.border}`, background: t.surface2, color: t.text, cursor: "pointer",
+    }}>
+      <option value="all">All Expiry</option>
+      <option value="expiring">Expiring ≤30 days</option>
+      <option value="expired">Expired</option>
+    </select>
+    {activeExtraFilterCount > 0 && (
+      <button onClick={() => { setStockFilter("all"); setExpiryFilter("all"); }} style={{ border: "none", background: "transparent", color: "#dc2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
+        <X size={12} /> Clear
+      </button>
+    )}
+
+    {!showArchived && (
+      <>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: t.text2, cursor: "pointer", padding: "5px 14px", borderRadius: 20, border: `1.5px solid ${t.border}` }}>
+          <input type="checkbox" checked={uniqueMedicineIds.length > 0 && selected.length === uniqueMedicineIds.length} onChange={toggleAll} style={{ accentColor: t.green, width: 12, height: 12 }} />
+          Select All
+        </label>
+        {selected.length > 0 && (
+          <button onClick={archiveSelected} style={{ padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: "none", background: t.green, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+            <ArchiveIcon size={12} /> Archive ({selected.length})
+          </button>
         )}
-      </div>
+      </>
+    )}
+  </div>
+</div>
 
       {/* Active table — batch-level rows */}
       {!showArchived && (
@@ -746,8 +754,8 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
 
       {/* Modals */}
       {showAddModal && (
-        <AddMedicineModal onClose={() => setShowAddModal(false)} onSaved={() => { fetchMedicines(); fetchBatchRows(); onMedicineAdded?.(); }} onToast={onToast} defaultTab={activeTab} />
-      )}
+  <AddMedicineModal onClose={() => setShowAddModal(false)} onSaved={() => { fetchMedicines(); fetchBatchRows(); onMedicineAdded?.(); }} onToast={onToast} defaultTab={activeTab === "all" ? "drugs" : activeTab} />
+)}
       {editingBatch && (
         <EditBatchModal
           batch={editingBatch}
