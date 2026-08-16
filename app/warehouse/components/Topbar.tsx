@@ -161,7 +161,7 @@ export default function Topbar() {
 
     const { data, error } = await supabase
       .from('users')
-      .select('username, email, avatar_url, role')
+      .select('first_name, last_name, email, avatar_url, role')
       .eq('user_id', uid)
       .maybeSingle()
 
@@ -181,7 +181,8 @@ export default function Topbar() {
       return
     }
 
-    setUserName(data.username || 'Name')
+    const fullName = [data.first_name, data.last_name].filter(Boolean).join(' ')
+    setUserName(fullName || 'Name')
     setUserEmail(data.email || '')
     setUserRole(
       data.role

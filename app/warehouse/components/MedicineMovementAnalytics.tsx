@@ -1,11 +1,11 @@
 'use client'
 import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
+import { ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 
 // ---- Config ----
 const WINDOW_DAYS = 30
 const COMPLETED_STATUSES = ['released', 'received'] as const
-const TOP_N = 5 // how many to show per list on the dashboard card
 
 // A release counts as "movement" for a medicine once it has been confirmed
 // out the door — 'released' (batches decremented) or 'received' (recipient
@@ -233,14 +233,24 @@ export default function MedicineMovementAnalytics() {
     }
   }, [stats])
 
-  // Single ranked list (mirrors the Stock Levels "one list, ranked" layout),
-  // filterable by the pills at the bottom instead of two side-by-side columns.
-  const visibleStats = useMemo(() => {
-    const filtered = filter === 'all' ? stats : stats.filter(s => s.category === filter)
-    return filtered.slice(0, TOP_N)
+  // Scatter view: quantity vs. frequency is the actual shape of the combined
+  // score (0.5 qty + 0.5 freq) — a single ranked bar collapses both into one
+  // number and hides which axis is driving a medicine's category. `stats` is
+  // already sorted by score desc, so scatterPoints[0] is the current top mover.
+  const scatterPoints = useMemo(() => {
+    return filter === 'all' ? stats : stats.filter(s => s.category === filter)
   }, [stats, filter])
 
-  const maxVisibleQty = Math.max(1, ...visibleStats.map(s => s.totalQty))
+  const topMover = scatterPoints[0]
+
+  const scatterByCategory = useMemo(() => {
+    const groups: Record<MovementStat['category'], MovementStat[]> = { fast: [], moderate: [], slow: [] }
+    for (const s of scatterPoints) {
+      if (topMover && s.medicine_id === topMover.medicine_id) continue
+      groups[s.category].push(s)
+    }
+    return groups
+  }, [scatterPoints, topMover])
 
   if (loading) {
     return (
@@ -285,50 +295,62 @@ export default function MedicineMovementAnalytics() {
       </div>
 
       <div style={{ padding: '14px 16px 16px', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', marginBottom: 12, flexShrink: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', marginBottom: 2, flexShrink: 0 }}>
           Movement — {filter === 'all' ? 'All' : CATEGORY_META[filter].label}
-          <span style={{ fontWeight: 400, color: 'var(--text3)' }}> · Top {TOP_N}</span>
+        </div>
+        <div style={{ fontSize: 10, color: 'var(--text3)', marginBottom: 8, flexShrink: 0 }}>
+          Quantity vs. times released — each dot is one medicine
         </div>
 
-        {/* ---- Ranked list with dot + bar, same visual grammar as Stock Levels.
-            flex: 1 here is what keeps the card the SAME height no matter which
-            filter is active (All/Fast/Moderate/Slow) — fewer rows just leave
-            blank space in this area instead of shrinking the whole card, so
-            the pills + footer below never jump around. ---- */}
-        {visibleStats.length === 0 ? (
+        {/* ---- Scatter: quantity (y) vs frequency (x), colored by category.
+            Replaces the old single-bar ranking so both inputs to the
+            fast/moderate/slow score are visible at once, not just their
+            blend. The top mover gets a direct label per the "label the
+            extreme, not every point" rule. ---- */}
+        {scatterPoints.length === 0 ? (
           <div style={{ ...emptyStyle, flex: 1 }}>Nothing to show for this filter.</div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14, flex: 1, overflowY: 'auto' }}>
-            {visibleStats.map(s => {
-              const meta = CATEGORY_META[s.category]
-              const barPct = s.totalQty === 0 ? 0 : Math.max(6, Math.round((s.totalQty / maxVisibleQty) * 100))
-              return (
-                <div key={s.medicine_id}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: meta.dot, flexShrink: 0 }} />
-                      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {s.generic_name}
-                      </span>
-                      <span style={{ fontSize: 10.5, color: 'var(--text3)', flexShrink: 0 }}>
-                        {s.dosage_strength}{s.dosage_form ? ` · ${s.dosage_form}` : ''}
-                      </span>
-                    </div>
-                    <span style={{ fontSize: 12.5, fontWeight: 700, color: meta.dot, flexShrink: 0, marginLeft: 8 }}>
-                      {s.totalQty === 0 ? 'No movement' : `${s.totalQty} ${baseUnitLabel(s.unit)}`}
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ flex: 1, height: 8, borderRadius: 999, background: meta.barBg, overflow: 'hidden' }}>
-                      <div style={{ width: `${barPct}%`, height: '100%', borderRadius: 999, background: meta.bar, transition: 'width .3s ease' }} />
-                    </div>
-                    <span style={{ fontSize: 10, color: 'var(--text3)', flexShrink: 0, minWidth: 58, textAlign: 'right' }}>
-                      {s.frequency}x released
-                    </span>
-                  </div>
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <ScatterChart margin={{ top: 8, right: 10, bottom: 0, left: 0 }}>
+                  <CartesianGrid stroke="var(--border)" strokeDasharray="0" />
+                  <XAxis
+                    type="number" dataKey="frequency" name="Times released"
+                    tick={{ fill: 'var(--text3)', fontSize: 10 }}
+                    axisLine={{ stroke: 'var(--border)' }} tickLine={false}
+                    allowDecimals={false}
+                  />
+                  <YAxis
+                    type="number" dataKey="totalQty" name="Units"
+                    tick={{ fill: 'var(--text3)', fontSize: 10 }}
+                    axisLine={{ stroke: 'var(--border)' }} tickLine={false}
+                    width={34}
+                  />
+                  <Tooltip content={<ScatterTooltip />} cursor={{ stroke: 'var(--text3)', strokeDasharray: '0' }} />
+                  {(['fast', 'moderate', 'slow'] as const).map(cat => (
+                    scatterByCategory[cat].length > 0 && (
+                      <Scatter key={cat} name={CATEGORY_META[cat].label} data={scatterByCategory[cat]} fill={CATEGORY_META[cat].dot} />
+                    )
+                  ))}
+                  {topMover && (
+                    <Scatter
+                      data={[topMover]}
+                      fill={CATEGORY_META[topMover.category].dot}
+                      label={{ position: 'top', dataKey: 'generic_name', fontSize: 10, fontWeight: 700, fill: 'var(--text)' }}
+                    />
+                  )}
+                </ScatterChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ display: 'flex', gap: 14, justifyContent: 'center', marginTop: 2, flexShrink: 0 }}>
+              {(['fast', 'moderate', 'slow'] as const).map(cat => (
+                <div key={cat} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--text2)' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: CATEGORY_META[cat].dot, flexShrink: 0 }} />
+                  {CATEGORY_META[cat].label}
                 </div>
-              )
-            })}
+              ))}
+            </div>
           </div>
         )}
 
@@ -353,6 +375,26 @@ export default function MedicineMovementAnalytics() {
             </button>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ---- Scatter hover tooltip: name, category, and the two raw numbers the
+// combined score is built from (the scatter's whole reason for existing) ----
+function ScatterTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: MovementStat }> }) {
+  if (!active || !payload || !payload.length) return null
+  const s = payload[0].payload
+  const meta = CATEGORY_META[s.category]
+  return (
+    <div style={{
+      background: 'var(--surface, #fff)', border: '1px solid var(--border)', borderRadius: 8,
+      padding: '8px 10px', fontSize: 11, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+    }}>
+      <div style={{ fontWeight: 700, color: 'var(--text)', marginBottom: 2 }}>{s.generic_name}</div>
+      <div style={{ color: meta.dot, fontWeight: 600, marginBottom: 2 }}>{meta.label}</div>
+      <div style={{ color: 'var(--text2)' }}>
+        {s.totalQty === 0 ? 'No movement' : `${s.totalQty} ${baseUnitLabel(s.unit)}`} · {s.frequency}x released
       </div>
     </div>
   )

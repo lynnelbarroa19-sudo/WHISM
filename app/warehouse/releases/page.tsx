@@ -29,6 +29,16 @@
 // Without running that SQL file, "Confirm Receipt" will fail with a
 // "function confirm_release_receipt does not exist" error.
 //
+// NOTE 3: Also run release_items_display_columns.sql on Supabase — it
+// adds `display_quantity` / `display_unit` to release_items. Those two
+// columns store the quantity/unit exactly as entered in the dispense
+// form (e.g. "1" + "Box"), separate from `quantity`, which stays in
+// base pieces because that's what confirm_release_receipt() deducts
+// against. Without this column pair, this page falls back to showing
+// the raw base-piece `quantity` next to the medicine's stored `unit`
+// text — which is what caused "1 Box" to display as "50 Box" (the
+// piece-equivalent of 1 box) before this fix.
+//
 // CHANGED: "Confirm Receipt" no longer takes an ID photo upload. It
 // uses a mouse/finger-drawn digital signature (SignaturePad) as proof
 // of receipt. The signature PNG is stored in the existing
@@ -69,6 +79,13 @@
 // and the `StatCard` component were removed since nothing else used
 // them; the `Layers` / `Clock3` / `PackageCheck` icon imports were
 // dropped for the same reason.
+//
+// FIXED (quantity display bug): the Qty column, CSV export, and the
+// printable receipt now show `display_quantity` + `display_unit` when
+// present (the amount/unit exactly as entered in the dispense form —
+// e.g. "1 Box"), falling back to the old raw `quantity` + medicine
+// `unit` only for legacy rows created before release_items had those
+// two columns. See formatQty() below and NOTE 3 above.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useTheme } from 'next-themes'
@@ -109,6 +126,12 @@ interface ReleaseRecord {
   release_item_id: string
   release_id: string
   quantity: number
+  // What the dispensing staff actually typed/selected in the dispense
+  // form (e.g. 1 + "Box"), independent of `quantity` which is always in
+  // base pieces. NULL on releases created before this pair of columns
+  // existed — see formatQty() for the fallback.
+  display_quantity: number | null
+  display_unit: string | null
   batch_id: string
   batch_number: string | null
   expiration_date: string | null
@@ -154,6 +177,26 @@ interface ReleaseGroup {
 }
 
 // ============================================================
+// Quantity display helper
+// ============================================================
+
+// Prefers what the user actually entered (display_quantity + display_unit,
+// e.g. "1 Box") over the raw base-piece `quantity` + medicine `unit`
+// (which, before this fix, printed "50 Box" for the same line — the
+// piece-equivalent of 1 box, mislabeled with the medicine's packaging
+// unit text). Falls back to the old raw values only for legacy rows
+// written before release_items had display_quantity/display_unit.
+function formatQty(item: ReleaseRecord): string {
+  if (item.display_quantity != null && item.display_unit) {
+    const q = item.display_quantity
+    const rounded = Math.round(q * 100) / 100
+    const qtyStr = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2)
+    return `${qtyStr} ${item.display_unit}`
+  }
+  return `${item.quantity} ${item.unit || ''}`.trim()
+}
+
+// ============================================================
 // FEFO / expiry helpers
 // ============================================================
 
@@ -180,6 +223,8 @@ async function getReleaseRecords(): Promise<ReleaseRecord[]> {
     .select(`
       release_item_id,
       quantity,
+      display_quantity,
+      display_unit,
       batch_id,
       medicine_batches (
         batch_number,
@@ -221,6 +266,8 @@ async function getReleaseRecords(): Promise<ReleaseRecord[]> {
       release_item_id: row.release_item_id,
       release_id: rel?.release_id,
       quantity: row.quantity,
+      display_quantity: row.display_quantity ?? null,
+      display_unit: row.display_unit ?? null,
       batch_id: row.batch_id,
       batch_number: batch?.batch_number ?? null,
       expiration_date: batch?.expiration_date ?? null,
@@ -798,7 +845,7 @@ export default function ReleasesPage() {
       r.brand_name ? `${r.generic_name} (${r.brand_name})` : r.generic_name,
       r.batch_number || '',
       r.expiration_date || '',
-      r.quantity,
+      formatQty(r),
       r.destination_name,
       r.received_by_name || '',
       r.status,
@@ -1046,7 +1093,7 @@ export default function ReleasesPage() {
                               {expiry === 'expired' && <span style={{ fontSize: 9, marginLeft: 5, background: T.redLight, color: T.red, border: `1px solid ${T.redBorder}`, borderRadius: 4, padding: '1px 5px', fontWeight: 800 }}>EXPIRED</span>}
                               {expiry === 'expiring_soon' && <span style={{ fontSize: 9, marginLeft: 5, background: T.amberLight, color: T.amber, border: `1px solid ${T.amberBorder}`, borderRadius: 4, padding: '1px 5px', fontWeight: 800 }}>SOON</span>}
                             </td>
-                            <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{item.quantity} {item.unit || ''}</td>
+                            <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{formatQty(item)}</td>
 
                             {isFirst && (
                               <td rowSpan={rowSpan} style={{ padding: '11px 12px', verticalAlign: 'top', borderLeft: `1px solid ${bdr}` }}>
@@ -1208,7 +1255,7 @@ export default function ReleasesPage() {
                     <strong style={{ color: txt }}>Release {receiveTarget.release_number}</strong> to {receiveTarget.destination_name}:
                     <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
                       {receiveTarget.items.map((it) => (
-                        <li key={it.release_item_id}>{it.generic_name} — {it.quantity} {it.unit || ''}</li>
+                        <li key={it.release_item_id}>{it.generic_name} — {formatQty(it)}</li>
                       ))}
                     </ul>
                   </div>
@@ -1355,7 +1402,7 @@ export default function ReleasesPage() {
                           </td>
                           <td style={{ padding: '8px 4px' }}>{item.batch_number || '—'}</td>
                           <td style={{ padding: '8px 4px' }}>{item.expiration_date || 'N/A'}</td>
-                          <td style={{ padding: '8px 4px', textAlign: 'right' }}>{item.quantity}</td>
+                          <td style={{ padding: '8px 4px', textAlign: 'right' }}>{formatQty(item)}</td>
                         </tr>
                       ))}
                     </tbody>
