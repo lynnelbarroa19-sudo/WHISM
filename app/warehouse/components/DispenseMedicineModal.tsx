@@ -220,6 +220,23 @@ function toBaseQty(row: { quantity: string; dispenseUnit: DispenseUnit; boxBaseQ
   return n
 }
 
+// Inverse of toBaseQty — converts a base-piece amount (e.g. one FEFO
+// allocation line, which is always expressed in pieces) back into whatever
+// unit the user originally entered the row in, so we can persist what they
+// actually typed (e.g. "1 Box") instead of the piece count ("50").
+//
+// NOTE: if a Box/Strip-denominated row gets FEFO-split across two batches
+// with the SAME boxBaseQty/stripBaseQty (the normal case, since those are
+// derived from the medicine's own packaging and don't vary batch-to-batch
+// in practice), each split line divides back out evenly. If a fractional
+// result ever occurs, the UI rounds for display only — `quantity` (base
+// pieces) remains the exact, authoritative figure used for stock deduction.
+function fromBaseQty(baseQty: number, unit: DispenseUnit, boxBaseQty: number, stripBaseQty: number): number {
+  if (unit === 'box' && boxBaseQty > 0) return baseQty / boxBaseQty
+  if (unit === 'strip' && stripBaseQty > 0) return baseQty / stripBaseQty
+  return baseQty
+}
+
 function maxForUnit(row: { totalAvailable: number; dispenseUnit: DispenseUnit; boxAvailable: number; stripAvailable: number }): number {
   if (row.dispenseUnit === 'box') return row.boxAvailable
   if (row.dispenseUnit === 'strip') return row.stripAvailable
@@ -448,6 +465,7 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
       searchQuery: med.brand_name ? `${med.generic_name} (${med.brand_name})` : med.generic_name,
       showDropdown: false,
     })
+    setError('')
   }
 
   // Changing the Batch filter clears whatever medicine was already picked on
@@ -462,7 +480,23 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
     })
   }
 
-  const addRow = () => setMedicines(prev => [blankRow(), ...prev])
+  // Appends a new blank row to the END of the list (so the first medicine
+  // added always stays "Medicine #1", and each new one is numbered after
+  // it — never re-numbered/reshuffled to the top).
+  //
+  // Guarded: won't add a new row while an existing row is still empty (no
+  // medicine selected yet) — forces the user to finish the current row
+  // first instead of piling up multiple blank rows.
+  const addRow = () => {
+    const hasEmptyRow = medicines.some(m => !m.medicine_id)
+    if (hasEmptyRow) {
+      setError('Please select a medicine for the current row before adding another.')
+      return
+    }
+    setError('')
+    setMedicines(prev => [...prev, blankRow()])
+  }
+
   const removeRow = (id: string) => {
     if (medicines.length === 1) return
     setMedicines(prev => prev.filter(m => m.id !== id))
@@ -629,8 +663,21 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
     }
 
     // ---- PASS 1b: build the intended allocation per row against fresh data;
-    // bail before writing anything if any medicine is already short on paper. ----
-    type RowAllocationSet = { medicine_id: string; generic_name: string; allocations: Allocation[] }
+    // bail before writing anything if any medicine is already short on paper.
+    //
+    // We also carry the row's ORIGINAL dispense unit (Box/Strip/Loose/Bottle)
+    // and its box/strip->pieces conversion factors through to PASS 3, so each
+    // release_item can store what the user actually typed (display_quantity /
+    // display_unit) alongside the base-piece `quantity` used for deduction. ----
+    type RowAllocationSet = {
+      medicine_id: string
+      generic_name: string
+      allocations: Allocation[]
+      dispenseUnit: DispenseUnit
+      boxBaseQty: number
+      stripBaseQty: number
+      unitLabel: string
+    }
     const rowAllocationSets: RowAllocationSet[] = []
     const receiptItems: ReceiptItem[] = []
 
@@ -649,7 +696,15 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
         return
       }
 
-      rowAllocationSets.push({ medicine_id: med.medicine_id, generic_name: med.generic_name, allocations })
+      rowAllocationSets.push({
+        medicine_id: med.medicine_id,
+        generic_name: med.generic_name,
+        allocations,
+        dispenseUnit: med.dispenseUnit,
+        boxBaseQty: med.boxBaseQty,
+        stripBaseQty: med.stripBaseQty,
+        unitLabel: unitTypeLabel(med),
+      })
       receiptItems.push({ name: med.generic_name, qty: med.quantity, unit: unitTypeLabel(med) })
     }
 
@@ -698,12 +753,26 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
     // ---- PASS 3: write one release_item PER BATCH ALLOCATION (a row can
     // produce 2+ release_items if it was split FEFO across batches). This is
     // the reserved FEFO plan for later — medicine_batches quantities are
-    // untouched until the release is confirmed as 'released'. ----
+    // untouched until the release is confirmed as 'released'.
+    //
+    // `quantity` stays in base pieces (unchanged) — it's what
+    // confirm_release_receipt() deducts against. `display_quantity` /
+    // `display_unit` additionally store what the user actually entered
+    // (e.g. 1 Box) for each split line, converted back out of that line's
+    // own piece count — this is what fixes "1 Box" showing up as "50 Box"
+    // on the Releases page. ----
     for (const set of rowAllocationSets) {
       for (const alloc of set.allocations) {
+        const displayQuantity = fromBaseQty(alloc.quantity, set.dispenseUnit, set.boxBaseQty, set.stripBaseQty)
         const { error: itemError } = await supabase
           .from('release_items')
-          .insert({ release_id: releaseId, batch_id: alloc.batch_id, quantity: alloc.quantity })
+          .insert({
+            release_id: releaseId,
+            batch_id: alloc.batch_id,
+            quantity: alloc.quantity,
+            display_quantity: displayQuantity,
+            display_unit: set.unitLabel,
+          })
         if (itemError) {
           await supabase.from('releases').delete().eq('release_id', releaseId)
           setError(`Error recording release item for "${set.generic_name}". The dispense was cancelled — no stock was deducted.`)
@@ -732,6 +801,7 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
   const validCount = medicines.filter(m => m.medicine_id && m.quantity).length
   const destinationInvalid = !!error && !destination
   const destPendingSelection = !destination && destQuery.trim().length > 0
+  const hasEmptyMedRow = medicines.some(m => !m.medicine_id)
 
   if (receipt) {
     return (
@@ -920,7 +990,19 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
             <button
               type="button"
               onClick={addRow}
-              style={{ background: 'var(--green)', color: '#fff', border: 'none', borderRadius: 20, padding: '4px 12px', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+              disabled={hasEmptyMedRow}
+              title={hasEmptyMedRow ? 'Select a medicine for the current row first' : undefined}
+              style={{
+                background: hasEmptyMedRow ? 'var(--border)' : 'var(--green)',
+                color: hasEmptyMedRow ? 'var(--text3)' : '#fff',
+                border: 'none',
+                borderRadius: 20,
+                padding: '4px 12px',
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: hasEmptyMedRow ? 'not-allowed' : 'pointer',
+                fontFamily: 'inherit',
+              }}
             >
               + Add Medicine
             </button>

@@ -86,8 +86,50 @@ function sourceColor(source: string | null) {
   return 'var(--text3)'
 }
 
-const VISIBLE_COUNT = 5
+const VISIBLE_COUNT = 3
 const CARD_HEIGHT = 340
+
+// ── Composition donut (Highest/Medium/Lowest at a glance) ──────────────────
+// Part-to-whole job -> donut is the right call here (3 segments, "at a
+// glance" per dataviz guidance) since the ranked bar list below is a
+// different job (ranking), not a duplicate of it.
+function LevelDonut({ counts }: { counts: { highest: number; medium: number; lowest: number } }) {
+  const size = 56
+  const strokeW = 9
+  const r = (size - strokeW) / 2
+  const circumference = 2 * Math.PI * r
+  const total = counts.highest + counts.medium + counts.lowest
+  const segments = [
+    { key: 'highest', value: counts.highest, color: '#16a34a' },
+    { key: 'medium', value: counts.medium, color: '#f59e0b' },
+    { key: 'lowest', value: counts.lowest, color: '#ef4444' },
+  ]
+
+  let offset = 0
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0, transform: 'rotate(-90deg)' }}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--border)" strokeWidth={strokeW} />
+      {total > 0 && segments.map(seg => {
+        if (seg.value === 0) return null
+        const dash = (seg.value / total) * circumference
+        const el = (
+          <circle
+            key={seg.key}
+            cx={size / 2} cy={size / 2} r={r}
+            fill="none"
+            stroke={seg.color}
+            strokeWidth={strokeW}
+            strokeDasharray={`${Math.max(dash - 2, 0)} ${circumference - dash + 2}`}
+            strokeDashoffset={-offset}
+            strokeLinecap="butt"
+          />
+        )
+        offset += dash
+        return el
+      })}
+    </svg>
+  )
+}
 
 const selectStyle: React.CSSProperties = {
   border: '1px solid var(--border)',
@@ -319,6 +361,19 @@ export default function StockLevelCard() {
             </div>
           ) : (
             <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+                <LevelDonut counts={counts} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 0 }}>
+                  {FILTERS.filter(f => f.key !== 'all').map(f => (
+                    <div key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: f.color, flexShrink: 0 }} />
+                      <span style={{ flex: 1, color: 'var(--text2)' }}>{f.label}</span>
+                      <span style={{ fontWeight: 700, color: f.color }}>{f.count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--text)', marginBottom: 14 }}>
                 {filter === 'all' ? 'Stock — All' : `Stock — ${FILTERS.find(f => f.key === filter)?.label}`}
                 <span style={{ fontWeight: 500, color: 'var(--text3)' }}> · {batchLabel} · {sourceLabel}</span>

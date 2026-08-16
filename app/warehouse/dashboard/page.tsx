@@ -9,6 +9,7 @@ import StockLevelCard from '../components/StockLevelCard'
 import DispensedMedicineCard from '../components/DispensedMedicineCard'
 import DispenseMedicineModal from '../components/DispenseMedicineModal'
 import MedicineMovementAnalytics from '../components/MedicineMovementAnalytics'
+import PredictionCard from '../components/PredictionCard'
 import styles from '../components/warehouse.module.css'
 
 
@@ -122,11 +123,12 @@ function DashboardInner() {
               style={{
                 display: 'grid',
                 gridTemplateColumns: '1fr 1fr',
-                gridTemplateRows: 'auto 380px 380px',
+                gridTemplateRows: 'auto 380px 380px 400px',
                 gridTemplateAreas: `
                   "analytics analytics"
                   "expiring  dispensed"
                   "movement  stock"
+                  "prediction prediction"
                 `,
                 gap: 18,
               }}
@@ -143,6 +145,10 @@ function DashboardInner() {
 
               <div style={{ gridArea: 'dispensed', height: '100%', overflow: 'hidden' }}>
                 <DispensedMedicineCard key={`dispensed-${refreshKey}`} />
+              </div>
+
+              <div style={{ gridArea: 'prediction', height: '100%', overflow: 'hidden' }}>
+                <PredictionCard key={`prediction-${refreshKey}`} />
               </div>
             </div>
           </div>

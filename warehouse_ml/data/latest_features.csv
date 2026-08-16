@@ -1,0 +1,13 @@
+medicine_name,medicine_category,rolling_avg_recent,same_month_last_year,days_since_last_request
+Cefalexin,Antibiotic,63.666666666666664,65.0,12
+Loperamide,Antidiarrheal,50.666666666666664,56.0,11
+Salbutamol Nebule,Respiratory,140.33333333333334,150.66666666666666,11
+Multivitamins,Vitamins,50.333333333333336,47.0,14
+Cetirizine,Antihistamine,90.66666666666667,102.0,9
+Paracetamol 500mg,Pain Reliever,131.33333333333334,135.5,13
+Biogesic,Pain Reliever,54.333333333333336,42.666666666666664,11
+Mefenamic Acid,Pain Reliever,62.666666666666664,65.33333333333333,8
+Amoxicillin 500mg,Antibiotic,54.333333333333336,50.666666666666664,9
+Metformin 500mg,Maintenance,140.66666666666666,128.66666666666666,10
+ORS (Oral Rehydration Salts),Rehydration,75.33333333333333,76.25,7
+Ferrous Sulfate,Vitamins,59.333333333333336,56.25,8
