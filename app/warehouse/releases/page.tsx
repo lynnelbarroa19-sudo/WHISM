@@ -71,6 +71,23 @@
 // (spanning all its medicine rows); Medicine / Batch No. / Expiration /
 // Qty stay one row per medicine.
 //
+// CHANGED (bulk Barangay releases): DispenseMedicineModal no longer
+// lets the user pick a single barangay — choosing "Barangay" as the
+// destination type now creates ONE separate `releases` row PER
+// BARANGAY (96 total), each with its own release_items, so this page
+// naturally lists 96 rows/groups for a single bulk-dispense action
+// (grouped by release_id exactly like any other release — no special
+// casing needed here). Each barangay's release still gets its own
+// Confirm Receipt / signature, since each barangay has a different
+// claimant.
+//
+// REMOVED: "Pharmacy" is no longer offered as a release destination
+// type (removed from DispenseMedicineModal). Dropped the "Pharmacy"
+// chip from the Destination filter row below — legacy releases that
+// already have destination_type = 'Pharmacy' still render fine in the
+// table and under "All", they just no longer have a dedicated filter
+// chip.
+//
 // REMOVED: The "Total Releases / Pending / Received" stat cards row at
 // the top of the page has been removed per request. The status tabs in
 // the filter bar (All / Pending / Received / Rejected / Cancelled)
@@ -116,6 +133,10 @@ import DispenseMedicineModal from '../components/DispenseMedicineModal'
 // text still works) — nothing in this page sets either value anymore.
 type ReleaseStatus = 'pending' | 'approved' | 'released' | 'received' | 'rejected' | 'cancelled'
 type ConfirmationMethod = 'digital_signature' | 'manual_signature'
+// 'Pharmacy' stays in the type (and in DEST_TYPE_COLORS below) purely so
+// legacy releases created before it was removed as an option still
+// type-check and render correctly — it's just no longer offered as a
+// filter chip or a destination choice in DispenseMedicineModal.
 type DestinationType = 'Barangay' | 'Pharmacy' | 'Laboratory' | 'Office'
 
 // One row in the flat query result = one medicine/batch line item within
@@ -431,6 +452,9 @@ function StatusBadge({ status }: { status: ReleaseStatus }) {
   )
 }
 
+// 'Pharmacy' stays mapped here (even though it's no longer a selectable
+// filter chip below) purely so legacy release rows with that destination
+// type still get a sensible color if ever referenced elsewhere.
 const DEST_TYPE_COLORS: Record<DestinationType, string> = {
   Barangay: T.green,
   Pharmacy: '#0369a1',
@@ -606,10 +630,13 @@ const STATUS_TABS: { key: ReleaseStatus | 'all'; label: string }[] = [
   { key: 'cancelled', label: 'Cancelled' },
 ]
 
+// REMOVED: 'Pharmacy' chip — Pharmacy is no longer offered as a release
+// destination type in DispenseMedicineModal. Legacy releases with that
+// destination_type still appear under "All" and remain searchable; they
+// just don't get a dedicated filter chip anymore.
 const DEST_TYPE_PILLS: { key: DestinationType | 'all'; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'Barangay', label: 'Barangay' },
-  { key: 'Pharmacy', label: 'Pharmacy' },
   { key: 'Laboratory', label: 'Laboratory' },
   { key: 'Office', label: 'Office' },
 ]
@@ -1226,8 +1253,9 @@ export default function ReleasesPage() {
           {/* ── New Release — now just DispenseMedicineModal, same modal
               used elsewhere to dispense medicine. It fetches its own
               medicines/destinations, builds its own FEFO allocation, and
-              writes the release + release_items itself; on success we
-              just close it and refresh the table. ── */}
+              writes the release + release_items itself (including the
+              bulk-to-all-96-barangays flow); on success we just close it
+              and refresh the table. ── */}
           {showModal && (
             <DispenseMedicineModal
               onClose={() => setShowModal(false)}
@@ -1238,7 +1266,9 @@ export default function ReleasesPage() {
           {/* ── Confirm Receipt modal — the ONLY signing step now.
               The claimant (the person picking up the medicine) fills in
               their own details and signs ONCE, covering every medicine
-              line under this release_id. ── */}
+              line under this release_id. For a bulk barangay dispense
+              this modal is opened once PER BARANGAY, since each barangay
+              is its own release_id with its own claimant. ── */}
           {receiveTarget && (
             <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 3000, padding: 16 }} onClick={closeReceiveModal}>
               <div style={{ background: card, borderRadius: T.radius, width: '100%', maxWidth: 420, maxHeight: '90vh', overflowY: 'auto', boxShadow: shadow, border: `1px solid ${bdr}` }} onClick={(e) => e.stopPropagation()}>

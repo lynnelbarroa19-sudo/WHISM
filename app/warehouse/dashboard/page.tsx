@@ -10,6 +10,7 @@ import DispensedMedicineCard from '../components/DispensedMedicineCard'
 import DispenseMedicineModal from '../components/DispenseMedicineModal'
 import MedicineMovementAnalytics from '../components/MedicineMovementAnalytics'
 import PredictionCard from '../components/PredictionCard'
+import BarangayDistributionCard from '../components/Barangaydistributioncard'
 import styles from '../components/warehouse.module.css'
 
 
@@ -118,17 +119,22 @@ function DashboardInner() {
                 Stock Levels) — parehong magkatapat na cards ay magkapareho
                 ng height (380px sa parehong row), kaya magkapantay
                 silang apat. Note: "movement" ay hiwalay na gridArea sa
-                "expiring" (dating dahilan ng overlap ng "(3)" badge). */}
+                "expiring" (dating dahilan ng overlap ng "(3)" badge).
+
+                "prediction" -- ISANG column na lang ito (hindi na
+                "prediction prediction"), kaya kasing-lapad ito ng Medicine
+                Movement/Stock Levels sa halip na buong-lapad ng dalawang
+                column. Ang katabing cell ay bakante muna ("."). */}
             <div
               style={{
                 display: 'grid',
                 gridTemplateColumns: '1fr 1fr',
-                gridTemplateRows: 'auto 380px 380px 400px',
+                gridTemplateRows: 'auto 380px 380px 380px',
                 gridTemplateAreas: `
-                  "analytics analytics"
-                  "expiring  dispensed"
-                  "movement  stock"
-                  "prediction prediction"
+                  "analytics  analytics"
+                  "expiring   dispensed"
+                  "movement   stock"
+                  "prediction barangay"
                 `,
                 gap: 18,
               }}
@@ -149,6 +155,10 @@ function DashboardInner() {
 
               <div style={{ gridArea: 'prediction', height: '100%', overflow: 'hidden' }}>
                 <PredictionCard key={`prediction-${refreshKey}`} />
+              </div>
+
+              <div style={{ gridArea: 'barangay', height: '100%', overflow: 'hidden' }}>
+                <BarangayDistributionCard key={`barangay-${refreshKey}`} />
               </div>
             </div>
           </div>

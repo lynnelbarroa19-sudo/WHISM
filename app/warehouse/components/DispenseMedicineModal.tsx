@@ -80,7 +80,8 @@ interface DestinationOption {
   destination_type: string
 }
 
-const DESTINATION_TYPES = ['Barangay', 'Pharmacy', 'Laboratory', 'Office'] as const
+// REMOVED: 'Pharmacy' — no longer offered as a release destination type.
+const DESTINATION_TYPES = ['Barangay', 'Laboratory', 'Office'] as const
 type DestType = (typeof DESTINATION_TYPES)[number]
 
 const PENDING_ID = '__pending__'
@@ -112,6 +113,16 @@ const BARANGAYS: string[] = [
 // actually have that breakdown (pieces_per_strip / strips_per_box set).
 type DispenseUnit = 'base' | 'strip' | 'box'
 
+// Filters the medicine search pool by the `category` column on `medicines`
+// — which (per how this deployment's Inventory page already uses it) holds
+// either 'Drug' or 'Supply'. '' = no filter, show both.
+type ItemTypeFilter = '' | 'Drug' | 'Supply'
+const ITEM_TYPE_OPTIONS: { key: ItemTypeFilter; label: string }[] = [
+  { key: '', label: 'All' },
+  { key: 'Drug', label: 'Medicine / Drug' },
+  { key: 'Supply', label: 'Supply' },
+]
+
 // One line of the FEFO breakdown for a row — which batch, how much, when it expires.
 interface Allocation {
   batch_id: string
@@ -137,8 +148,8 @@ interface MedicineRow {
   dispenseUnit: DispenseUnit
   searchQuery: string
   showDropdown: boolean
-  notes: string
   selectedBatchNumber: string   // '' = no filter, auto FEFO across all batches for this medicine
+  itemTypeFilter: ItemTypeFilter // '' = show both Drug and Supply in the search
 }
 
 interface Props { onClose: () => void; onSuccess: () => void }
@@ -151,8 +162,8 @@ function blankRow(): MedicineRow {
     dosage_form: '', unit: '', category: '', totalAvailable: 0, batches: [],
     boxBaseQty: 0, stripBaseQty: 0, boxAvailable: 0, stripAvailable: 0,
     quantity: '', dispenseUnit: 'base',
-    searchQuery: '', showDropdown: false, notes: '',
-    selectedBatchNumber: '',
+    searchQuery: '', showDropdown: false,
+    selectedBatchNumber: '', itemTypeFilter: '',
   }
 }
 
@@ -248,9 +259,9 @@ type Receipt = {
   release_number: string
   destination: string
   date: string
-  receivedBy: string
-  position: string
   items: ReceiptItem[]
+  isBulk?: boolean   // true for the "released to all 96 barangays" summary
+  note?: string       // extra explanatory line shown only for bulk releases
 }
 
 export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
@@ -261,12 +272,11 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
   const [allDestinations, setAllDestinations] = useState<DestinationOption[]>([])
   const [destFetchError, setDestFetchError] = useState('')
   const [destType, setDestType] = useState<DestType | null>(null)
-  const [destQuery, setDestQuery] = useState('')
-  const [showDestDropdown, setShowDestDropdown] = useState(false)
+  // `destination` only ever holds a single destination now — for Laboratory
+  // / Office. Barangay releases target all 96 barangays at once and don't
+  // need a single destination selected here (see handleSubmitBulkBarangay).
   const [destination, setDestination] = useState<DestinationOption | null>(null)
 
-  const [receivedByName, setReceivedByName] = useState('')
-  const [receivedByPosition, setReceivedByPosition] = useState('')
   const [remarks, setRemarks] = useState('')
   const [dateReleased, setDateReleased] = useState(new Date().toISOString().split('T')[0])
 
@@ -397,12 +407,17 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
       .sort((a, b) => b.batch_number.localeCompare(a.batch_number))
   }, [allMedicines])
 
-  // Medicine search pool, optionally locked to one batch_number. When locked,
-  // each medicine's `batches` is narrowed to just that batch (and totalAvailable
-  // recomputed) so everything downstream — FEFO calc, breakdown preview,
-  // availability text, dropdown rows — reflects only that batch automatically.
-  const getFilteredMeds = (query: string, batchNumber: string) => {
+  // Medicine search pool, optionally locked to one batch_number and/or one
+  // item type (Drug vs Supply, read off the `category` column). When locked
+  // to a batch, each medicine's `batches` is narrowed to just that batch
+  // (and totalAvailable recomputed) so everything downstream — FEFO calc,
+  // breakdown preview, availability text, dropdown rows — reflects only
+  // that batch automatically.
+  const getFilteredMeds = (query: string, batchNumber: string, itemType: ItemTypeFilter = '') => {
     let pool = allMedicines
+    if (itemType) {
+      pool = pool.filter(m => (m.category || '').trim().toLowerCase() === itemType.toLowerCase())
+    }
     if (batchNumber) {
       pool = pool
         .map(m => {
@@ -421,12 +436,6 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
     if (!query.trim()) return pool
     return pool.filter(m => m.generic_name.toLowerCase().includes(query.toLowerCase())
       || (m.brand_name || '').toLowerCase().includes(query.toLowerCase()))
-  }
-
-  const getFilteredBarangays = (query: string) => {
-    const q = query.trim().toLowerCase()
-    if (!q) return BARANGAYS
-    return BARANGAYS.filter(b => b.toLowerCase().includes(q))
   }
 
   const updateRow = (id: string, fields: Partial<MedicineRow>) => {
@@ -480,6 +489,18 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
     })
   }
 
+  // Changing the Medicine/Supply toggle clears whatever medicine was already
+  // picked on that row, since the previously-picked item may belong to the
+  // other category and would no longer match the new filter.
+  const handleItemTypeFilterChange = (rowId: string, itemType: ItemTypeFilter) => {
+    updateRow(rowId, {
+      itemTypeFilter: itemType,
+      medicine_id: '', generic_name: '', searchQuery: '',
+      totalAvailable: 0, batches: [], quantity: '',
+      boxBaseQty: 0, stripBaseQty: 0, boxAvailable: 0, stripAvailable: 0,
+    })
+  }
+
   // Appends a new blank row to the END of the list (so the first medicine
   // added always stays "Medicine #1", and each new one is numbered after
   // it — never re-numbered/reshuffled to the top).
@@ -502,26 +523,10 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
     setMedicines(prev => prev.filter(m => m.id !== id))
   }
 
-  const handleDestBlur = () => {
-    setTimeout(() => {
-      setShowDestDropdown(false)
-      if (destination || !destQuery.trim() || destType !== 'Barangay') return
-      const matches = getFilteredBarangays(destQuery)
-      if (matches.length === 1) handleSelectBarangay(matches[0])
-    }, 150)
-  }
-
-  const handleSelectBarangay = (name: string) => {
-    setShowDestDropdown(false)
-    setDestQuery('')
-    const existing = allDestinations.find(d => d.destination_type === 'Barangay' && d.destination_name === name)
-    setDestination(existing || { destination_id: PENDING_ID, destination_name: name, destination_type: 'Barangay' })
-  }
-
+  // Fixed-destination picker for Laboratory / Office — Barangay no longer
+  // goes through this (it's bulk-only now, see the button handler below).
   const selectFixedDestination = (type: Exclude<DestType, 'Barangay'>) => {
     setDestType(type)
-    setShowDestDropdown(false)
-    setDestQuery('')
     setError('')
     const existing = allDestinations.find(d => d.destination_type === type)
     setDestination(existing || { destination_id: PENDING_ID, destination_name: type, destination_type: type })
@@ -555,7 +560,9 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
   // Live FEFO preview per row — recomputed whenever quantity/unit/selection/batch
   // filter changes. Drives the breakdown UI under each quantity field. Purely
   // client-side, using the batch snapshot loaded at modal open; the authoritative
-  // recompute against fresh data happens again in handleSubmit.
+  // recompute against fresh data happens again in handleSubmit /
+  // handleSubmitBulkBarangay. For Barangay mode this preview still shows the
+  // PER-BARANGAY split — the real submit multiplies this out across all 96.
   const rowPreviews = useMemo(() => {
     const map = new Map<string, { allocations: Allocation[]; shortfall: number }>()
     for (const med of medicines) {
@@ -567,12 +574,40 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
     return map
   }, [medicines])
 
+  // Non-blocking heads-up used in the Confirm dialog and (per-row) in the
+  // quantity field — lists medicines whose CURRENT stock can't cover all 96
+  // barangays at the quantity typed, and how many barangays it actually
+  // covers. Purely informational; nothing here blocks Confirm anymore — it's
+  // the warehouse staff's call how much to dispense.
+  const barangayShortagePreview = useMemo(() => {
+    if (destType !== 'Barangay') return [] as string[]
+    const lines: string[] = []
+    for (const med of medicines) {
+      if (!med.medicine_id || !med.quantity) continue
+      const entered = Number(med.quantity) || 0
+      if (entered <= 0) continue
+      const available = maxForUnit(med)
+      const fulfillable = Math.min(BARANGAYS.length, Math.floor(available / entered))
+      if (fulfillable < BARANGAYS.length) {
+        lines.push(`${med.generic_name}: ${available} ${unitTypeLabel(med)} available ngayon — sapat lang para sa ${fulfillable}/${BARANGAYS.length} barangay`)
+      }
+    }
+    return lines
+  }, [medicines, destType])
+
   const validate = () => {
     const validMeds = medicines.filter(m => m.medicine_id && m.quantity)
     if (validMeds.length === 0) return 'Add at least one medicine with quantity.'
-    if (!destination) return 'Destination is required.'
-    if (!receivedByName.trim()) return 'Received By is required.'
-    if (!receivedByPosition.trim()) return 'Position is required.'
+    if (!destType) return 'Destination is required.'
+
+    // Received By / Position are no longer captured here for ANY
+    // destination type — every release (Barangay, Laboratory, Office)
+    // is created as 'pending' with no claimant info, exactly like the
+    // Barangay flow. The claimant fills in their own name/position and
+    // signs later, at "Confirm Receipt" on the Releases page.
+    if (destType !== 'Barangay') {
+      if (!destination) return 'Destination is required.'
+    }
 
     for (const med of validMeds) {
       const entered = Number(med.quantity)
@@ -580,10 +615,22 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
       if (!Number.isInteger(entered) || entered <= 0) {
         return `Quantity for "${med.generic_name}" must be a whole number greater than 0 ${unitLabel}(s).`
       }
-      const maxAllowed = maxForUnit(med)
-      if (entered > maxAllowed) {
-        const scope = med.selectedBatchNumber ? `in Batch ${med.selectedBatchNumber}` : 'across all batches'
-        return `Insufficient stock for "${med.generic_name}". Only ${maxAllowed} ${unitLabel}(s) available ${scope}.`
+
+      // CHANGED: Barangay bulk mode no longer blocks Confirm just because
+      // total stock can't cover all 96 barangays at the entered quantity —
+      // that's the warehouse staff's call now. They still get a
+      // non-blocking amber warning in the UI (barangayShort/
+      // barangayFulfillable, rendered per-row below) showing current stock
+      // and how many barangays it actually covers, but Confirm stays
+      // enabled either way. Partial fulfillment (stopping a medicine once
+      // its stock runs out, instead of erroring the whole bulk release) is
+      // handled inside handleSubmitBulkBarangay() via fulfillableByMed.
+      if (destType !== 'Barangay') {
+        const maxAllowed = maxForUnit(med)
+        if (entered > maxAllowed) {
+          const scope = med.selectedBatchNumber ? `in Batch ${med.selectedBatchNumber}` : 'across all batches'
+          return `Insufficient stock for "${med.generic_name}". Only ${maxAllowed} ${unitLabel}(s) available ${scope}.`
+        }
       }
     }
     return ''
@@ -604,10 +651,24 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
   const handleSubmit = async () => {
     const err = validate()
     if (err) { setError(err); return }
-    if (!destination) return
 
     setLoading(true)
     setError('')
+
+    const stored = localStorage.getItem('smartrhu_user')
+    let releasedBy: string | null = null
+    if (stored) { try { releasedBy = JSON.parse(stored).id || null } catch {} }
+
+    if (destType === 'Barangay') {
+      await handleSubmitBulkBarangay(releasedBy)
+      return
+    }
+
+    if (!destination) {
+      setError('Destination is required.')
+      setLoading(false)
+      return
+    }
 
     // ---- PASS 0: resolve destination ----
     const finalDestination = await resolveDestination(destination)
@@ -708,13 +769,12 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
       receiptItems.push({ name: med.generic_name, qty: med.quantity, unit: unitTypeLabel(med) })
     }
 
-    const stored = localStorage.getItem('smartrhu_user')
-    let releasedBy: string | null = null
-    if (stored) { try { releasedBy = JSON.parse(stored).id || null } catch {} }
-
     // ---- PASS 2: create release header as PENDING. It only becomes
-    // 'released' — and only then does medicine_batches get decremented —
-    // once the confirm-receipt step (separate component, TBD) marks it so. ----
+    // 'received' — and only then does medicine_batches get decremented —
+    // once the claimant confirms receipt (with their own name, position, and
+    // signature) via "Confirm Receipt" on the Releases page. Received By /
+    // Position are intentionally NOT collected here, for any destination
+    // type, matching the Barangay bulk flow — see NOTE above validate(). ----
     let releaseId: string | null = null
     let usedReleaseNumber = ''
     for (let attempt = 0; attempt < 3 && !releaseId; attempt++) {
@@ -725,8 +785,8 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
           release_number: candidateNumber,
           destination_id: finalDestination.destination_id,
           released_by: releasedBy,
-          received_by_name: receivedByName,
-          received_by_position: receivedByPosition,
+          received_by_name: null,
+          received_by_position: null,
           date_released: new Date(dateReleased).toISOString(),
           status: 'pending',
           remarks: remarks || null,
@@ -753,7 +813,7 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
     // ---- PASS 3: write one release_item PER BATCH ALLOCATION (a row can
     // produce 2+ release_items if it was split FEFO across batches). This is
     // the reserved FEFO plan for later — medicine_batches quantities are
-    // untouched until the release is confirmed as 'released'.
+    // untouched until the release is confirmed as 'received'.
     //
     // `quantity` stays in base pieces (unchanged) — it's what
     // confirm_release_receipt() deducts against. `display_quantity` /
@@ -787,9 +847,281 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
       release_number: usedReleaseNumber,
       destination: `${finalDestination.destination_name} (${finalDestination.destination_type})`,
       date: new Date(dateReleased).toLocaleDateString(),
-      receivedBy: receivedByName,
-      position: receivedByPosition,
       items: receiptItems,
+    })
+  }
+
+  // ============================================================
+  // Bulk Barangay release — triggered when destType === 'Barangay'.
+  // Quantity entered per medicine row is PER BARANGAY. This creates ONE
+  // `releases` row per barangay (96 total), each 'pending', with its own
+  // release_items reserving a FEFO slice of stock — so the very first
+  // barangay draws from the soonest-expiring batch, the next barangay
+  // continues from wherever that left off, and so on down the line, exactly
+  // like a single large FEFO draw split into 96 equal deliveries.
+  //
+  // CHANGED: this no longer aborts the whole bulk release when a medicine's
+  // stock can't cover all 96 barangays at the entered quantity. Instead it
+  // partially fulfills — the medicine is included in as many barangays'
+  // releases as the stock allows (starting from the first barangay), and is
+  // simply skipped for the remaining ones. Every one of the 96 releases still
+  // gets created; some just won't include every medicine. The receipt
+  // reports exactly which medicines were short and by how many barangays.
+  //
+  // Received By / Position / signature are intentionally NOT collected here
+  // — each barangay's claimant is different and signs separately later, via
+  // "Confirm Receipt" on the Releases page (one signature per barangay,
+  // covering that barangay's medicines only).
+  // ============================================================
+  const handleSubmitBulkBarangay = async (releasedBy: string | null) => {
+    const validMeds = medicines.filter(m => m.medicine_id && m.quantity)
+    const medicineIds = Array.from(new Set(validMeds.map(m => m.medicine_id)))
+    const totalBarangays = BARANGAYS.length
+
+    // ---- Step 0: refetch fresh batch data (stock may have moved since the
+    // modal opened) ----
+    const { data: freshBatches, error: freshError } = await supabase
+      .from('medicine_batches')
+      .select('batch_id, medicine_id, batch_number, strips_per_box, pieces_per_strip, total_quantity, status, expiration_date')
+      .in('medicine_id', medicineIds)
+      .in('status', ['available', 'low_stock'])
+      .gt('total_quantity', 0)
+
+    if (freshError || !freshBatches) {
+      setError('Could not verify current stock. Please try again.')
+      setLoading(false)
+      return
+    }
+
+    const freshByMed = new Map<string, BatchInfo[]>()
+    for (const b of freshBatches) {
+      const arr = freshByMed.get(b.medicine_id) || []
+      arr.push({ batch_id: b.batch_id, batch_number: b.batch_number, availableQty: b.total_quantity, boxes: 0, stripsPerBox: b.strips_per_box, piecesPerStrip: b.pieces_per_strip, expiryDate: b.expiration_date })
+      freshByMed.set(b.medicine_id, arr)
+    }
+    for (const arr of freshByMed.values()) {
+      arr.sort((a, b) => {
+        if (!a.expiryDate) return 1
+        if (!b.expiryDate) return -1
+        return a.expiryDate.localeCompare(b.expiryDate)
+      })
+    }
+
+    // ---- Step 1: figure out, per medicine, how many of the 96 barangays
+    // its CURRENT stock can actually cover (fulfillableByMed). This no
+    // longer blocks/aborts the whole bulk release when a medicine falls
+    // short — that decision belongs to the warehouse staff, who already saw
+    // the shortage warning (and the current stock figure) in the form and
+    // confirm dialog before getting here. Step 4 below skips that specific
+    // medicine for whichever barangays come after its stock runs out
+    // (partial fulfillment); medStockInfo keeps the available-in-display-
+    // unit figure so the receipt can report the shortage in the same units
+    // the staff typed the quantity in (e.g. "Box", not raw pieces). ----
+    const fulfillableByMed = new Map<string, number>()
+    const medStockInfo = new Map<string, { availableDisplay: number; unitLabel: string }>()
+    for (const med of validMeds) {
+      const perBarangayBase = toBaseQty(med)
+      let pool = freshByMed.get(med.medicine_id) || []
+      if (med.selectedBatchNumber) pool = pool.filter(b => b.batch_number === med.selectedBatchNumber)
+      const totalAvailableBase = pool.reduce((sum, b) => sum + b.availableQty, 0)
+      const fulfillable = perBarangayBase > 0
+        ? Math.min(totalBarangays, Math.floor(totalAvailableBase / perBarangayBase))
+        : totalBarangays
+      fulfillableByMed.set(med.medicine_id, fulfillable)
+      medStockInfo.set(med.medicine_id, {
+        availableDisplay: fromBaseQty(totalAvailableBase, med.dispenseUnit, med.boxBaseQty, med.stripBaseQty),
+        unitLabel: unitTypeLabel(med),
+      })
+    }
+
+    // ---- Step 2: make sure every one of the 96 barangays exists as a
+    // destination row (upsert any missing ones, ignoring duplicates so this
+    // is safe to re-run) ----
+    const missingBarangays = BARANGAYS.filter(name => !allDestinations.some(d => d.destination_type === 'Barangay' && d.destination_name === name))
+    if (missingBarangays.length > 0) {
+      const { error: upsertError } = await supabase
+        .from('destinations')
+        .upsert(
+          missingBarangays.map(name => ({ destination_name: name, destination_type: 'Barangay' })),
+          { onConflict: 'destination_name,destination_type', ignoreDuplicates: true }
+        )
+      if (upsertError) {
+        console.error('bulk barangay destination upsert:', upsertError)
+        setError('Could not set up all 96 barangay destinations. Please try again.')
+        setLoading(false)
+        return
+      }
+    }
+
+    const { data: barangayDests, error: barangayFetchError } = await supabase
+      .from('destinations')
+      .select('destination_id, destination_name, destination_type')
+      .eq('destination_type', 'Barangay')
+      .eq('is_active', true)
+
+    if (barangayFetchError || !barangayDests) {
+      setError('Could not load barangay destinations. Please try again.')
+      setLoading(false)
+      return
+    }
+
+    const destIdByBarangay = new Map<string, string>()
+    for (const d of barangayDests) destIdByBarangay.set(d.destination_name, d.destination_id)
+
+    const missingAfterUpsert = BARANGAYS.filter(name => !destIdByBarangay.has(name))
+    if (missingAfterUpsert.length > 0) {
+      setError(`Kulang ang destination record para sa: ${missingAfterUpsert.slice(0, 3).join(', ')}${missingAfterUpsert.length > 3 ? '...' : ''}. Please try again.`)
+      setLoading(false)
+      return
+    }
+
+    setAllDestinations(prev => {
+      const merged = [...prev]
+      for (const d of barangayDests) {
+        if (!merged.some(m => m.destination_id === d.destination_id)) merged.push(d)
+      }
+      return merged.sort((a, b) => a.destination_name.localeCompare(b.destination_name))
+    })
+
+    // ---- Step 3: bulk-create one release row per barangay in a single
+    // insert call. Release numbers get a per-barangay index suffix so all
+    // 96 are guaranteed unique within this batch without needing 96
+    // round-trip collision checks. ----
+    const dateIso = new Date(dateReleased).toISOString()
+    const now = new Date()
+    const datePart = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+    const batchTag = Math.floor(100 + Math.random() * 900)
+
+    const releaseRows = BARANGAYS.map((name, i) => ({
+      release_number: `RLS-${datePart}-${batchTag}${String(i).padStart(2, '0')}`,
+      destination_id: destIdByBarangay.get(name)!,
+      released_by: releasedBy,
+      received_by_name: null,
+      received_by_position: null,
+      date_released: dateIso,
+      status: 'pending',
+      remarks: remarks || null,
+    }))
+
+    const { data: insertedReleases, error: releasesInsertError } = await supabase
+      .from('releases')
+      .insert(releaseRows)
+      .select('release_id, release_number')
+
+    if (releasesInsertError || !insertedReleases || insertedReleases.length !== totalBarangays) {
+      console.error('bulk barangay releases insert:', releasesInsertError)
+      setError('Error creating the 96 barangay release records. Please try again.')
+      setLoading(false)
+      return
+    }
+
+    const releaseIds = insertedReleases.map(r => r.release_id)
+
+    // ---- Step 4: allocate FEFO per barangay per medicine, draining a
+    // running copy of freshByMed as we go so barangay #2 continues wherever
+    // barangay #1 left off — one continuous FEFO draw, just split into 96
+    // equal per-barangay deliveries. Any medicine whose stock runs out
+    // partway through (i >= fulfillableByMed) is simply skipped for the
+    // remaining barangays — their release rows still exist, just without
+    // that particular medicine. ----
+    const runningByMed = new Map<string, BatchInfo[]>()
+    for (const [k, arr] of freshByMed.entries()) runningByMed.set(k, arr.map(b => ({ ...b })))
+
+    type ItemRow = {
+      release_id: string
+      batch_id: string
+      quantity: number
+      display_quantity: number
+      display_unit: string
+    }
+    const itemRows: ItemRow[] = []
+
+    for (let i = 0; i < totalBarangays; i++) {
+      const releaseId = releaseIds[i]
+      for (const med of validMeds) {
+        const fulfillable = fulfillableByMed.get(med.medicine_id) ?? totalBarangays
+        // Stock for this medicine has already run out as of an earlier
+        // barangay in this loop — skip just THIS medicine for this
+        // barangay. The release row for this barangay still gets created
+        // and still receives whichever other medicines it qualifies for;
+        // only this one item is left out (partial fulfillment).
+        if (i >= fulfillable) continue
+
+        const perBarangayBase = toBaseQty(med)
+        let pool = runningByMed.get(med.medicine_id) || []
+        if (med.selectedBatchNumber) pool = pool.filter(b => b.batch_number === med.selectedBatchNumber)
+        const { allocations, shortfall } = allocateFEFO(pool, perBarangayBase)
+
+        if (shortfall > 0) {
+          // Safety net only — fulfillableByMed was precomputed in Step 1,
+          // so this shouldn't normally trigger. If stock moved between that
+          // computation and here (rare race), skip this one medicine for
+          // this one barangay instead of rolling back the entire 96-
+          // barangay bulk release.
+          continue
+        }
+
+        for (const alloc of allocations) {
+          const arr = runningByMed.get(med.medicine_id)
+          const b = arr?.find(x => x.batch_id === alloc.batch_id)
+          if (b) b.availableQty -= alloc.quantity
+          itemRows.push({
+            release_id: releaseId,
+            batch_id: alloc.batch_id,
+            quantity: alloc.quantity,
+            display_quantity: fromBaseQty(alloc.quantity, med.dispenseUnit, med.boxBaseQty, med.stripBaseQty),
+            display_unit: unitTypeLabel(med),
+          })
+        }
+      }
+    }
+
+    // ---- Step 5: bulk insert every release_item, chunked in case a
+    // multi-medicine / FEFO-split bulk release produces a large number of
+    // rows across the 96 releases. A failure here IS a real DB error
+    // (unrelated to stock shortage, which is already handled above), so it
+    // still rolls back everything. ----
+    const CHUNK = 500
+    for (let start = 0; start < itemRows.length; start += CHUNK) {
+      const chunk = itemRows.slice(start, start + CHUNK)
+      const { error: itemsError } = await supabase.from('release_items').insert(chunk)
+      if (itemsError) {
+        console.error('bulk barangay release_items insert:', itemsError)
+        await supabase.from('releases').delete().in('release_id', releaseIds)
+        setError('Error recording release items for the bulk barangay release. Nothing was saved — please try again.')
+        setLoading(false)
+        return
+      }
+    }
+
+    // Build a plain-language shortage summary for any medicine whose stock
+    // couldn't cover all 96 barangays — shown in the receipt so the
+    // warehouse staff knows exactly which barangays (by count) got skipped
+    // for which medicine, without digging through the Releases table.
+    const shortageLines: string[] = []
+    for (const med of validMeds) {
+      const fulfillable = fulfillableByMed.get(med.medicine_id) ?? totalBarangays
+      if (fulfillable < totalBarangays) {
+        const info = medStockInfo.get(med.medicine_id)
+        const roundedAvail = info ? Math.round(info.availableDisplay * 100) / 100 : 0
+        shortageLines.push(
+          `${med.generic_name}: ${fulfillable}/${totalBarangays} barangay lang ang nakatanggap nito (available stock: ${roundedAvail} ${info?.unitLabel || ''}). Ang natitirang ${totalBarangays - fulfillable} barangay ay walang gamot na ito sa release nila.`
+        )
+      }
+    }
+
+    const baseNote = `${totalBarangays} magkakahiwalay na PENDING release ang nagawa — isa bawat barangay. Ang Received By/Position at signature ng bawat barangay ay ilalagay sa "Confirm Receipt" sa Releases page, per barangay — wala pang stock na na-deduct hangga't hindi pa naco-confirm ang resibo ng barangay na iyon.`
+
+    setLoading(false)
+    setReceipt({
+      release_number: `${totalBarangays} releases (${insertedReleases[0].release_number} – ${insertedReleases[totalBarangays - 1].release_number})`,
+      destination: `Lahat ng ${totalBarangays} Barangay`,
+      date: new Date(dateReleased).toLocaleDateString(),
+      items: validMeds.map(med => ({ name: med.generic_name, qty: med.quantity, unit: unitTypeLabel(med) })),
+      isBulk: true,
+      note: shortageLines.length > 0
+        ? `⚠ May kulang na stock:\n${shortageLines.join('\n')}\n\n${baseNote}`
+        : baseNote,
     })
   }
 
@@ -799,8 +1131,6 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
   }
 
   const validCount = medicines.filter(m => m.medicine_id && m.quantity).length
-  const destinationInvalid = !!error && !destination
-  const destPendingSelection = !destination && destQuery.trim().length > 0
   const hasEmptyMedRow = medicines.some(m => !m.medicine_id)
 
   if (receipt) {
@@ -820,7 +1150,7 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
           <div className={styles.modalBody} id="dispense-receipt">
             <div style={{ textAlign: 'center', marginBottom: 14 }}>
               <div style={{ fontSize: 12, color: 'var(--text3)' }}>Release No.</div>
-              <div style={{ fontSize: 18, fontWeight: 800, color: 'var(--green)' }}>{receipt.release_number}</div>
+              <div style={{ fontSize: receipt.isBulk ? 13 : 18, fontWeight: 800, color: 'var(--green)' }}>{receipt.release_number}</div>
               <div style={{ display: 'inline-block', marginTop: 6, padding: '3px 10px', borderRadius: 20, background: '#fff7ed', color: '#c2410c', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.04em' }}>
                 Pending
               </div>
@@ -828,11 +1158,10 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
             <div style={{ fontSize: 13, lineHeight: 1.8 }}>
               <div><strong>Date:</strong> {receipt.date}</div>
               <div><strong>Destination:</strong> {receipt.destination}</div>
-              <div><strong>Received By:</strong> {receipt.receivedBy} ({receipt.position})</div>
             </div>
             <div style={{ borderTop: '1px solid var(--border)', margin: '12px 0' }} />
             <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', marginBottom: 6 }}>
-              Medicines to Release
+              {receipt.isBulk ? 'Medicines (per barangay)' : 'Medicines to Release'}
             </div>
             {receipt.items.map((it, i) => (
               <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
@@ -840,9 +1169,15 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                 <span style={{ fontWeight: 700 }}>{it.qty} {it.unit}(s)</span>
               </div>
             ))}
-            <div style={{ marginTop: 12, fontSize: 11.5, color: 'var(--text3)', lineHeight: 1.5 }}>
-              Stock has not been deducted yet. This will move to <strong>Released</strong> and the batch quantities will be decremented once receipt is confirmed.
-            </div>
+            {receipt.note ? (
+              <div style={{ marginTop: 12, fontSize: 11.5, color: 'var(--text3)', lineHeight: 1.5, whiteSpace: 'pre-line' }}>
+                {receipt.note}
+              </div>
+            ) : (
+              <div style={{ marginTop: 12, fontSize: 11.5, color: 'var(--text3)', lineHeight: 1.5 }}>
+                Received By / Position and signature will be captured on the <strong>Releases</strong> page once the claimant picks this up. Stock has not been deducted yet — that happens once receipt is confirmed there.
+              </div>
+            )}
           </div>
           <div className={styles.modalFooter}>
             <button className={styles.btnCancel} onClick={() => window.print()}>PRINT</button>
@@ -877,8 +1212,6 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                     if (t === 'Barangay') {
                       setDestType('Barangay')
                       setDestination(null)
-                      setDestQuery('')
-                      setShowDestDropdown(true)
                       setError('')
                     } else {
                       selectFixedDestination(t)
@@ -902,83 +1235,34 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
               ))}
             </div>
 
-            {destType && destType !== 'Barangay' ? (
-              <div
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: 10,
-                  border: '1px solid var(--border)',
-                  background: 'var(--surface2)',
-                  fontSize: 13,
-                  fontWeight: 600,
-                  color: destination ? 'var(--text)' : 'var(--text3)',
-                }}
-              >
-                {destination ? `${destination.destination_name} (${destination.destination_type})` : 'Selecting...'}
+            {/* Fixed display box — for Barangay this now always means "all
+                96 barangays, one release each"; for Laboratory/Office it
+                shows the single resolved destination, same as before. There
+                is no more per-barangay search/picker. */}
+            <div
+              style={{
+                padding: '10px 12px',
+                borderRadius: 10,
+                border: '1px solid var(--border)',
+                background: 'var(--surface2)',
+                fontSize: 13,
+                fontWeight: 600,
+                color: destType ? 'var(--text)' : 'var(--text3)',
+              }}
+            >
+              {destType === 'Barangay'
+                ? `Lahat ng ${BARANGAYS.length} Barangay (bulk release — 1 release bawat barangay)`
+                : destination
+                  ? `${destination.destination_name} (${destination.destination_type})`
+                  : destType
+                    ? 'Selecting...'
+                    : 'Pumili ng destination type sa itaas'}
+            </div>
+            {destType && destType !== 'Barangay' && (
+              <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4, lineHeight: 1.5 }}>
+                ℹ Received By / Position and the claimant's signature are captured later, on the <strong>Releases</strong> page, when receipt is confirmed.
               </div>
-            ) : (
-              <>
-                <input
-                  id="destination-search"
-                  type="text"
-                  className={styles.modalInput}
-                  value={destination ? `${destination.destination_name} (${destination.destination_type})` : destQuery}
-                  onChange={e => { setDestQuery(e.target.value); setDestination(null); setShowDestDropdown(true) }}
-                  onFocus={() => destType && setShowDestDropdown(true)}
-                  onBlur={handleDestBlur}
-                  placeholder={destType ? 'Search barangay...' : 'Choose a type above first'}
-                  autoComplete="off"
-                  disabled={!destType}
-                  style={{ borderColor: (destinationInvalid || destPendingSelection) ? '#f59e0b' : undefined }}
-                />
-                {destPendingSelection && (
-                  <div style={{ fontSize: 11, color: '#b45309', marginTop: 3 }}>
-                    ⚠ Select a barangay from the list below to confirm it.
-                  </div>
-                )}
-                {showDestDropdown && destType === 'Barangay' && (
-                  <div
-                    onMouseDown={e => e.preventDefault()}
-                    style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10, zIndex: 100, maxHeight: 260, overflowY: 'auto' }}
-                  >
-                    {getFilteredBarangays(destQuery).length === 0 ? (
-                      <div style={{ padding: '12px 14px', fontSize: 12, color: 'var(--text3)', textAlign: 'center' }}>No matching barangay.</div>
-                    ) : (
-                      getFilteredBarangays(destQuery).map(name => {
-                        const isRegistered = allDestinations.some(d => d.destination_type === 'Barangay' && d.destination_name === name)
-                        return (
-                          <button
-                            key={name}
-                            type="button"
-                            onMouseDown={() => handleSelectBarangay(name)}
-                            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', textAlign: 'left', padding: '9px 14px', border: 'none', borderBottom: '1px solid var(--border)', background: 'transparent', cursor: 'pointer', fontFamily: 'inherit' }}
-                          >
-                            <span style={{ fontSize: 13, fontWeight: 600 }}>{name}</span>
-                            {isRegistered && <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--green)' }}>✓ Barangay</span>}
-                          </button>
-                        )
-                      })
-                    )}
-                  </div>
-                )}
-              </>
             )}
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <div>
-              <label htmlFor="received-by-name">Received By *</label>
-              <input id="received-by-name" type="text" className={styles.modalInput} value={receivedByName} onChange={e => setReceivedByName(e.target.value)} placeholder="Recipient name" />
-            </div>
-            <div>
-              <label htmlFor="received-by-position">Position *</label>
-              <input id="received-by-position" type="text" className={styles.modalInput} value={receivedByPosition} onChange={e => setReceivedByPosition(e.target.value)} placeholder="e.g. BHW" />
-            </div>
-          </div>
-
-          <div>
-            <label htmlFor="remarks">Remarks <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text3)' }}>(optional)</span></label>
-            <textarea id="remarks" className={styles.modalInput} value={remarks} onChange={e => setRemarks(e.target.value)} rows={2} placeholder="Notes for this release" />
           </div>
 
           <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
@@ -1029,8 +1313,23 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
           {medicines.map((med, index) => {
             const medCanUseBox = med.medicine_id ? canUseBox(med) : false
             const medCanUseStrip = med.medicine_id ? canUseStrip(med) : false
-            const maxQty = maxForUnit(med)
-            const exceeds = med.quantity !== '' && Number(med.quantity) > maxQty
+            const maxQtyTotal = maxForUnit(med)
+            // CHANGED: Barangay bulk mode no longer caps/blocks on a
+            // per-barangay division of total stock (previously
+            // Math.floor(maxQtyTotal / 96), which made even small stock
+            // counts look artificially maxed-out at 1). The warehouse
+            // staff now decides the quantity themselves — this only shows
+            // a non-blocking amber warning (barangayShort) when the
+            // current stock can't cover all 96 barangays at that quantity.
+            // Office/Laboratory (single destination, single recipient)
+            // still hard-caps at actual available stock, since there's
+            // nowhere else for that stock to "partially" go.
+            const exceeds = destType !== 'Barangay' && med.quantity !== '' && Number(med.quantity) > maxQtyTotal
+            const enteredQty = Number(med.quantity) || 0
+            const barangayFulfillable = destType === 'Barangay' && enteredQty > 0
+              ? Math.min(BARANGAYS.length, Math.floor(maxQtyTotal / enteredQty))
+              : null
+            const barangayShort = barangayFulfillable !== null && barangayFulfillable < BARANGAYS.length
             const preview = rowPreviews.get(med.id)
             const showBreakdown = preview && preview.allocations.length > 1 && preview.shortfall === 0
 
@@ -1049,6 +1348,37 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                     Remove
                   </button>
                 )}
+              </div>
+
+              {/* Item type — filters the Medicine Name search to just Drugs
+                  (medicines) or just Supplies, based on the `category`
+                  column. Defaults to "All" (both). Switching this clears
+                  whatever was already selected on this row. */}
+              <div style={{ marginBottom: 8 }}>
+                <label htmlFor={`med-itemtype-${med.id}`}>Type</label>
+                <div id={`med-itemtype-${med.id}`} style={{ display: 'flex', gap: 6 }}>
+                  {ITEM_TYPE_OPTIONS.map(opt => (
+                    <button
+                      key={opt.key || 'all'}
+                      type="button"
+                      onClick={() => handleItemTypeFilterChange(med.id, opt.key)}
+                      style={{
+                        flex: 1,
+                        padding: '6px 4px',
+                        fontSize: 11.5,
+                        fontWeight: 700,
+                        borderRadius: 8,
+                        border: med.itemTypeFilter === opt.key ? '1px solid var(--green)' : '1px solid var(--border)',
+                        background: med.itemTypeFilter === opt.key ? 'var(--green)' : 'var(--surface)',
+                        color: med.itemTypeFilter === opt.key ? '#fff' : 'var(--text2)',
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* Optional manual Batch filter — leaving it blank keeps the
@@ -1097,16 +1427,27 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                   onChange={e => updateRow(med.id, { searchQuery: e.target.value, medicine_id: '', showDropdown: true, totalAvailable: 0, unit: '', category: '', batches: [], boxBaseQty: 0, stripBaseQty: 0, boxAvailable: 0, stripAvailable: 0 })}
                   onFocus={() => updateRow(med.id, { showDropdown: true })}
                   onBlur={() => setTimeout(() => updateRow(med.id, { showDropdown: false }), 150)}
-                  placeholder={med.selectedBatchNumber ? `Search within Batch ${med.selectedBatchNumber}...` : 'Click or type to search...'}
+                  placeholder={
+                    med.selectedBatchNumber
+                      ? `Search within Batch ${med.selectedBatchNumber}...`
+                      : med.itemTypeFilter
+                        ? `Search ${med.itemTypeFilter === 'Drug' ? 'medicines/drugs' : 'supplies'}...`
+                        : 'Click or type to search...'
+                  }
                   autoComplete="off"
                 />
                 {med.showDropdown && (() => {
-                  const rows = flattenToBatchRows(getFilteredMeds(med.searchQuery, med.selectedBatchNumber))
+                  const rows = flattenToBatchRows(getFilteredMeds(med.searchQuery, med.selectedBatchNumber, med.itemTypeFilter))
+                  const emptyLabel = med.selectedBatchNumber
+                    ? `No medicines found in Batch ${med.selectedBatchNumber}.`
+                    : med.itemTypeFilter
+                      ? `No ${med.itemTypeFilter === 'Drug' ? 'medicines/drugs' : 'supplies'} match your search.`
+                      : 'No medicines match your search.'
                   return (
                     <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10, boxShadow: '0 8px 24px rgba(0,0,0,0.15)', zIndex: 100, overflow: 'hidden', maxHeight: 220, overflowY: 'auto' }}>
                       {rows.length === 0 ? (
                         <div style={{ padding: '12px 14px', fontSize: 12, color: 'var(--text3)', textAlign: 'center' }}>
-                          {med.selectedBatchNumber ? `No medicines found in Batch ${med.selectedBatchNumber}.` : 'No medicines match your search.'}
+                          {emptyLabel}
                         </div>
                       ) : (
                         rows.map(row => {
@@ -1175,7 +1516,9 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
 
               <div style={{ marginBottom: 8 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 8 }}>
-                  <label htmlFor={`med-qty-${med.id}`} style={{ margin: 0 }}>Quantity *</label>
+                  <label htmlFor={`med-qty-${med.id}`} style={{ margin: 0 }}>
+                    Quantity {destType === 'Barangay' ? '(per barangay) ' : ''}*
+                  </label>
                   {(medCanUseBox || medCanUseStrip) ? (
                     <div style={{ display: 'flex', gap: 4 }}>
                       {/* Unit type: the medicine's actual base unit (Loose/
@@ -1208,23 +1551,30 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                   placeholder="0"
                   min="1"
                   step="1"
-                  max={maxQty || undefined}
-                  style={{ borderColor: exceeds ? '#ef4444' : undefined }}
+                  max={destType === 'Barangay' ? undefined : (maxQtyTotal || undefined)}
+                  style={{ borderColor: exceeds ? '#ef4444' : (barangayShort ? '#f59e0b' : undefined) }}
                 />
                 {exceeds && (
                   <div style={{ fontSize: 11, color: '#ef4444', marginTop: 3 }}>
-                    ⚠ Exceeds available stock ({maxQty} {unitTypeLabel(med)}(s) max{med.selectedBatchNumber ? ` in Batch ${med.selectedBatchNumber}` : ', across all batches'})
+                    ⚠ Exceeds available stock ({maxQtyTotal} {unitTypeLabel(med)}(s) max{med.selectedBatchNumber ? ` in Batch ${med.selectedBatchNumber}` : ', across all batches'})
+                  </div>
+                )}
+                {barangayShort && (
+                  <div style={{ fontSize: 11, color: '#b45309', marginTop: 3, lineHeight: 1.5 }}>
+                    ⚠ Available stock ngayon: {maxQtyTotal} {unitTypeLabel(med)}{med.selectedBatchNumber ? ` (sa Batch ${med.selectedBatchNumber})` : ''}. Sapat lang ito para sa {barangayFulfillable} sa {BARANGAYS.length} barangay — ang natitirang {BARANGAYS.length - (barangayFulfillable || 0)} barangay ay hindi makakatanggap ng gamot na ito. Puwede mo pa rin i-confirm — bahala ka sa dami.
                   </div>
                 )}
 
                 {/* FEFO breakdown preview — only shows when the entered qty spills
                     past the first batch into a second/third one within whatever
                     pool is active (all batches, or the locked batch — which will
-                    never trigger this since a locked row is a single batch). */}
+                    never trigger this since a locked row is a single batch).
+                    In Barangay mode this reflects ONE barangay's split; the
+                    actual submit repeats the FEFO draw 96 times in sequence. */}
                 {showBreakdown && preview && (
                   <div style={{ marginTop: 8, background: 'var(--green-light, #eafbf3)', border: '1px solid var(--green)', borderRadius: 8, padding: '8px 10px' }}>
                     <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--green)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>
-                      ↳ Split across {preview.allocations.length} batches (FEFO)
+                      ↳ Split across {preview.allocations.length} batches (FEFO){destType === 'Barangay' ? ' — per barangay' : ''}
                     </div>
                     {preview.allocations.map((a, i) => (
                       <div key={a.batch_id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '3px 0', borderTop: i > 0 ? '1px solid var(--border)' : 'none' }}>
@@ -1237,19 +1587,13 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
                   </div>
                 )}
               </div>
-
-              <div>
-                <label htmlFor={`med-notes-${med.id}`}>Notes <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text3)' }}>(optional)</span></label>
-                <textarea
-                  id={`med-notes-${med.id}`}
-                  className={styles.modalInput}
-                  value={med.notes}
-                  onChange={e => updateRow(med.id, { notes: e.target.value })}
-                  rows={2}
-                />
-              </div>
             </div>
           )})}
+
+          <div>
+            <label htmlFor="remarks">Remarks <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text3)' }}>(optional)</span></label>
+            <textarea id="remarks" className={styles.modalInput} value={remarks} onChange={e => setRemarks(e.target.value)} rows={2} placeholder="Notes for this release" />
+          </div>
 
           {error && (
             <div style={{ background: '#fee2e2', color: '#dc2626', padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 500 }}>
@@ -1282,8 +1626,25 @@ export default function DispenseMedicineModal({ onClose, onSuccess }: Props) {
               <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--text)', margin: '0 0 6px' }}>
                 Confirm Dispense
               </p>
-              <p style={{ fontSize: 12.5, color: 'var(--text2)', margin: '0 0 18px', lineHeight: 1.5 }}>
-                Record {validCount} medicine{validCount !== 1 ? 's' : ''} for release to {destination?.destination_name}? This will be saved as <strong>Pending</strong> — the FEFO batch allocation (oldest batch first) is reserved, but stock will only be deducted once receipt is confirmed.
+              <p style={{ fontSize: 12.5, color: 'var(--text2)', margin: '0 0 18px', lineHeight: 1.5, textAlign: 'left' }}>
+                {destType === 'Barangay' ? (
+                  <>
+                    Record {validCount} medicine{validCount !== 1 ? 's' : ''} for release to <strong>ALL {BARANGAYS.length} barangays</strong>? Bawat barangay ay makakatanggap ng eksaktong quantity na inilagay mo. Gagawa ito ng {BARANGAYS.length} magkakahiwalay na <strong>Pending</strong> release — ang FEFO batch allocation ay nakareserba na, pero ang stock ay ide-deduct lang per barangay kapag na-confirm na ang resibo noong barangay na iyon.
+                    {barangayShortagePreview.length > 0 && (
+                      <span style={{ display: 'block', marginTop: 10, color: '#b45309', fontWeight: 600 }}>
+                        ⚠ Kulang ang stock para sa ilang gamot — hindi lahat ng barangay makakatanggap:
+                        {barangayShortagePreview.map((line, i) => (
+                          <span key={i} style={{ display: 'block', fontWeight: 400, marginTop: 3 }}>• {line}</span>
+                        ))}
+                        <span style={{ display: 'block', fontWeight: 400, marginTop: 6 }}>Puwede mo pa ring ituloy — magpapatuloy ang release hanggang sa maubos ang stock ng bawat gamot.</span>
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    Record {validCount} medicine{validCount !== 1 ? 's' : ''} for release to {destination?.destination_name}? This will be saved as <strong>Pending</strong> — the FEFO batch allocation (oldest batch first) is reserved, but stock will only be deducted once the claimant confirms receipt (name, position, and signature) on the Releases page.
+                  </>
+                )}
               </p>
             </div>
             <div style={{ display: 'flex', gap: 10, padding: '0 22px 20px' }}>
