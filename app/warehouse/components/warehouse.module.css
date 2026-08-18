@@ -1648,6 +1648,101 @@
   font-size: 14px;
 }
 
+/* ---- PredictionCard (Demand Forecast) ---- */
+/* Compact category/shortage line under the header. One row only. */
+.predSummary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text2);
+  flex-shrink: 0;
+}
+.predSummaryItem { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.predSummaryItem b { color: var(--text); font-weight: 700; }
+.predSummaryAlert { color: #b91c1c; font-weight: 700; }
+
+/* Side-by-side split: Demand and Reserve shown at once, no tabs. */
+.predSplit {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  flex: 1;
+  min-height: 0;
+}
+.predColumn {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.predColumnRight {
+  border-left: 1px solid var(--border);
+  padding-left: 18px;
+}
+.predColumnHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.predColumnBadge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #fecaca;
+  color: #dc2626;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* List container: the only scrollable region, clipped on both axes. */
+.predList {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.predList::-webkit-scrollbar { width: 3px; }
+.predList::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.predRow {
+  transition: background .12s ease;
+  border-radius: 8px;
+  padding: 4px 6px;
+}
+.predRow:hover { background: var(--surface2); }
+
+.predSkeletonBar {
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface2) 25%, var(--border) 50%, var(--surface2) 75%);
+  background-size: 200% 100%;
+  animation: predShimmer 1.4s ease-in-out infinite;
+}
+@keyframes predShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.predSpin { animation: predSpinAnim .8s linear infinite; display: inline-block; }
+@keyframes predSpinAnim { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
 .stockPcs {
   font-size: 12px;
   color: #9ca3af;
