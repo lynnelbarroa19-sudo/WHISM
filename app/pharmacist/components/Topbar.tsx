@@ -6,12 +6,6 @@ import { useTheme } from '../lib/pharmacy'
 import { supabase } from '@/lib/supabase'
 
 type NotifKind = 'prescription' | 'restock'
-// Matches the REAL enum on pharmacy_requests.status (see the
-// pharmacy_requests_status_check constraint) — was previously
-// 'pending' | 'alerted' | 'confirmed' | 'rejected', which doesn't match
-// any actual status value ('confirm', not 'confirmed'; 'received' was
-// missing entirely), so restock notifications could never be built
-// correctly even once the table/columns below are fixed.
 type RestockStatus = 'pending' | 'confirm' | 'alerted' | 'rejected' | 'received'
 
 type Notification = {
@@ -24,7 +18,6 @@ type Notification = {
   restockStatus?: RestockStatus
 }
 
-// ── Date helper ───────────────────────────────────────────────────────────────
 function fmtDate(iso: string): string {
   try {
     return new Date(iso).toLocaleDateString('en-PH', {
@@ -35,7 +28,6 @@ function fmtDate(iso: string): string {
   }
 }
 
-// ── Persisted read state ─────────────────────────────────────────────────────
 function readStorageKey(pharmacistName: string): string {
   return `pharma_notif_read:${pharmacistName || 'anon'}`
 }
@@ -57,14 +49,12 @@ function saveReadIds(pharmacistName: string, ids: Set<string>) {
   try {
     window.localStorage.setItem(readStorageKey(pharmacistName), JSON.stringify(Array.from(ids)))
   } catch {
-    // localStorage unavailable (e.g. private mode quota) — read state just
-    // won't persist this session, nothing else breaks.
+    // localStorage unavailable — read state just won't persist this session.
   }
 }
 
 type NavigateFn = (page: string, tab?: 'profile' | 'password') => void
 
-// ── Toast (global toast notification) ─────────────────────────────
 type Props = {
   message: string;
   type: "success" | "error";
@@ -91,18 +81,32 @@ export function Toast({ message, type, onDone }: Props) {
   );
 }
 
-// ── Brand mark ────────────────────────────────────────────────────────────────
 function BrandMark() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-      
+      <div style={{
+        width: 42, height: 42, borderRadius: 12, flexShrink: 0,
+        background: 'linear-gradient(135deg,#22c55e,#0d9488)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        boxShadow: '0 3px 10px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.25)',
+        overflow: 'hidden',
+      }}>
+        <img
+          src="/rhulogo.png" alt="MHO Logo"
+          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+        />
+      </div>
       <div style={{ lineHeight: 1.15 }}>
-       
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 1 }}>
+          <span style={{ color: '#fff', fontSize: 17, fontWeight: 800, letterSpacing: '-0.01em' }}>SMART</span>
+          <span style={{ color: '#4ade80', fontSize: 17, fontWeight: 800, letterSpacing: '-0.01em' }}>RHU</span>
+        </div>
         <div style={{
           fontSize: 9.5, fontWeight: 700, letterSpacing: 1.4, textTransform: 'uppercase',
           color: 'rgba(255,255,255,0.55)', marginTop: 1,
         }}>
-         
+          Pharmacy
         </div>
       </div>
     </div>
@@ -114,7 +118,13 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
   const { dark, toggle, t } = useTheme()
   const router           = useRouter()
 
-  const [profileName,   setProfileName]   = useState('')
+  // Profile fields — first_name / last_name are the REAL columns on
+  // public.users (there is no `username` column, see the table DDL);
+  // using it caused the whole select() to fail silently, which is why
+  // both the name AND the avatar used to fall back to stale auth-session
+  // data instead of what's actually saved in Settings.
+  const [firstName,     setFirstName]     = useState('')
+  const [lastName,      setLastName]      = useState('')
   const [profileRole,   setProfileRole]   = useState('Pharmacist')
   const [profileAvatar, setProfileAvatar] = useState<string | null>(null)
   const [profileEmail,  setProfileEmail]  = useState('')
@@ -122,6 +132,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
   const [showProfile,   setShowProfile]   = useState(false)
   const [showNotif,     setShowNotif]     = useState(false)
   const [notifications, setNotifications] = useState<Notification[]>([])
+  const [headerHeight,  setHeaderHeight]  = useState(132)
 
   const [showLogoutModal, setShowLogoutModal] = useState(false)
 
@@ -130,17 +141,18 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
 
   const displayNameRef = useRef('')
   const readIdsRef = useRef<Set<string>>(new Set())
-
-  // Lazily-created AudioContext for the notification "ping" — created on
-  // first use rather than at mount, since some browsers refuse to start
-  // an AudioContext before any user interaction has happened on the page.
   const audioCtxRef = useRef<AudioContext | null>(null)
+
+  // Combined display name — declared early (right after the state above)
+  // so every hook/effect/render below it can safely reference it. This
+  // is what caused the last two errors: it must exist BEFORE any
+  // useEffect that depends on it, and BEFORE the JSX that renders it.
+  const fullName = [firstName, lastName].filter(Boolean).join(' ').trim()
 
   /** Short synthesized "ping" — no audio file needed. Only called from the
    *  two realtime postgres_changes handlers below, never from the initial
-   *  fetch functions, so it plays exactly once per genuinely NEW event
-   *  (prescription created, or restock status changed) and never on page
-   *  load / refresh / re-fetch of existing notifications. */
+   *  fetch functions, so it plays exactly once per genuinely NEW event and
+   *  never on page load / refresh / re-fetch of existing notifications. */
   function playNotifSound() {
     try {
       if (typeof window === 'undefined') return
@@ -162,8 +174,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
       osc.start()
       osc.stop(ctx.currentTime + 0.35)
     } catch {
-      // Autoplay restrictions or no AudioContext support — fail silently,
-      // the visual badge/dropdown still works either way.
+      // Autoplay restrictions or no AudioContext support — fail silently.
     }
   }
 
@@ -175,17 +186,20 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     const uid = session?.user?.id
     if (!uid) return
     const { data, error } = await supabase
-      .from('users').select('username, email, avatar_url, role')
+      .from('users').select('first_name, last_name, email, avatar_url, role')
       .eq('user_id', uid).single()
     if (error) {
       console.error('[Topbar] fetchProfile:', error.message, '| code:', error.code, '| details:', error.details, '| hint:', error.hint)
       return
     }
     if (data) {
-      setProfileName(data.username  || '')
-      setProfileEmail(data.email    || '')
-      setProfileRole(data.role      || 'Pharmacist')
-      if (data.avatar_url) setProfileAvatar(data.avatar_url)
+      setFirstName(data.first_name || '')
+      setLastName(data.last_name   || '')
+      setProfileEmail(data.email   || '')
+      setProfileRole(data.role     || 'Pharmacist')
+      // Cache-bust so a freshly-uploaded photo shows immediately instead
+      // of the browser serving a stale cached image at the same URL.
+      if (data.avatar_url) setProfileAvatar(`${data.avatar_url}?t=${Date.now()}`)
     }
   }
 
@@ -196,6 +210,19 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
       window.removeEventListener('profileUpdated', fetchProfile)
       window.removeEventListener('avatarUpdated',  fetchProfile)
     }
+  }, [])
+
+  // ── Match the sidebar's logo-block height so the topbar lines up ──
+  useEffect(() => {
+    const el = document.getElementById('phar-sidebar-logo-block')
+    if (!el) return
+
+    const update = () => setHeaderHeight(el.getBoundingClientRect().height)
+    update()
+
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
   }, [])
 
   // ── Clock ──────────────────────────────────────────────────────────────────
@@ -289,6 +316,12 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     }
   }
 
+  /** Derives the SAME "requested_by" string RequestMedicinePage.tsx uses
+   *  when submitting a request (username/full_name/email-prefix from auth
+   *  metadata) — kept separate from `fullName` (which now comes from the
+   *  users table's first_name/last_name) since these two can legitimately
+   *  differ and restock matching needs to use whichever string the request
+   *  row was actually saved with. */
   const fetchMatchName = async (): Promise<string> => {
     const { data: { session } } = await supabase.auth.getSession()
     const authUser = session?.user
@@ -300,7 +333,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
   useEffect(() => {
     (async () => {
       const matchName = await fetchMatchName()
-      const nameForReadState = matchName || profileName || user?.name || ''
+      const nameForReadState = matchName || fullName || user?.name || ''
       displayNameRef.current = nameForReadState
       readIdsRef.current = loadReadIds(nameForReadState)
       setNotifications(prev => prev.map(n =>
@@ -309,7 +342,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
       if (nameForReadState) fetchRestockNotifications(nameForReadState)
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profileName, user?.name])
+  }, [fullName, user?.name])
 
   function buildRestockNotif(row: any): Notification {
     const status: RestockStatus = (row.status ?? 'pending') as RestockStatus
@@ -419,7 +452,7 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     return `${Math.floor(diff / 86400)}d ago`
   }
 
-  const displayName   = profileName   || user?.name  || 'Pharmacist'
+  const displayName   = fullName      || user?.name  || 'Pharmacist'
   const displayRole   = profileRole   || user?.role  || 'Pharmacist'
   const displayEmail  = profileEmail  || user?.email || ''
   const displayAvatar = profileAvatar || null
@@ -530,31 +563,17 @@ export default function Topbar({ onNavigate }: { onNavigate?: NavigateFn }) {
     { icon: <IconSettings />, label: 'Settings',        action: () => goTo('settings', 'profile')  },
   ]
 
-  const [headerHeight, setHeaderHeight] = useState(132) // fallback lang habang di pa naka-measure
-
-useEffect(() => {
-  const el = document.getElementById('phar-sidebar-logo-block')
-  if (!el) return
-
-  const update = () => setHeaderHeight(el.getBoundingClientRect().height)
-  update()
-
-  const ro = new ResizeObserver(update)
-  ro.observe(el)
-  return () => ro.disconnect()
-}, [])
-
   return (
-   <header style={{
-  background: dark
-    ? 'linear-gradient(90deg,#03110a,#08200f 55%,#03110a)'
-    : 'linear-gradient(90deg,#173617,#1b3a1b 55%,#173617)',
-  height: headerHeight,
-  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-  padding: '0 24px', position: 'sticky', top: 0, zIndex: 40,
-  boxShadow: '0 1px 6px rgba(0,0,0,0.25)', gap: 16,
-  borderBottom: dark ? '1px solid rgba(74,222,128,0.1)' : '1px solid rgba(74,222,128,0.18)',
-}}>
+    <header style={{
+      background: dark
+        ? 'linear-gradient(90deg,#03110a,#08200f 55%,#03110a)'
+        : 'linear-gradient(90deg,#173617,#1b3a1b 55%,#173617)',
+      height: headerHeight,
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '0 24px', position: 'sticky', top: 0, zIndex: 40,
+      boxShadow: '0 1px 6px rgba(0,0,0,0.25)', gap: 16,
+      borderBottom: dark ? '1px solid rgba(74,222,128,0.1)' : '1px solid rgba(74,222,128,0.18)',
+    }}>
 
       <BrandMark />
 
