@@ -54,6 +54,7 @@ type PharmacyRequestRow = {
   fulfilled_at: string | null;
   fulfilled_qty: number | null;
   request_batch_id: string | null;
+  confirmed_at: string | null;
 };
 
 /** Draft/list-item shape used only inside the New Request form.
@@ -107,6 +108,15 @@ function fmtTime(iso: string) {
 
 const EMPTY_DRAFT: ItemDraft = { medicine: "", brand: "", dosage: "", type: "", unit: "Pieces", qty: 1, category: "drugs" };
 
+type SuggestReason = "low_stock" | "expiring" | "frequent";
+type SuggestedItem = { name: string; reason: SuggestReason };
+
+const REASON_LABEL: Record<SuggestReason, { label: string; bg: string; color: string }> = {
+  low_stock: { label: "Low stock", bg: "#fee2e2", color: "#991b1b" },
+  expiring:  { label: "Expiring soon", bg: "#fef3c7", color: "#92400e" },
+  frequent:  { label: "Frequently requested", bg: "#dbeafe", color: "#1d4ed8" },
+};
+
 export default function RequestMedicinePage({ onToast }: Props) {
   const { t } = useTheme();
 
@@ -133,10 +143,9 @@ export default function RequestMedicinePage({ onToast }: Props) {
   // Which item's "Mark Received" button is currently mid-request — used
   // to disable just that row's button (not the whole modal) while saving.
   const [markingId, setMarkingId] = useState<string | null>(null);
-const [qtyText, setQtyText] = useState("1");
-  // Prefill "Requested By" from the logged-in account's auth metadata —
-  // there's no separate `users` table, so username/email live on the
-  // Supabase Auth user itself — but keep it editable.
+  const [qtyText, setQtyText] = useState("1");
+  const [suggestions, setSuggestions] = useState<SuggestedItem[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   useEffect(() => {
     (async () => {
       const { data: { session } } = await supabase.auth.getSession();
@@ -153,7 +162,7 @@ const [qtyText, setQtyText] = useState("1");
     try {
       const { data, error } = await supabase
         .from("pharmacy_requests")
-        .select("id, medicine_name, brand_name, dosage, dosage_form, category, requested_qty, unit, status, requested_by, requested_at, notes, fulfilled_at, fulfilled_qty, request_batch_id")
+        .select("id, medicine_name, brand_name, dosage, dosage_form, category, requested_qty, unit, status, requested_by, requested_at, notes, fulfilled_at, fulfilled_qty, request_batch_id, confirmed_at")
         .order("requested_at", { ascending: false });
       if (error) throw error;
 
@@ -201,6 +210,69 @@ const [qtyText, setQtyText] = useState("1");
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, []);
+
+  /** Pulls smart suggestions for the "Generic Name"/"Supply Name" field:
+ *  medicines currently low on stock, medicines expiring soon, and
+ *  medicines this pharmacy requests often — all scoped to whichever
+ *  category (drugs/supplies) is currently selected. Reloaded whenever the
+ *  New Request modal opens or the category toggle changes. */
+const loadSuggestions = async (category: ItemCategory) => {
+  try {
+    const [{ data: stockData }, { data: reqData }] = await Promise.all([
+      supabase
+        .from("pharma_medicine_stock_summary")
+        .select("generic_name, total_quantity, nearest_expiry")
+        .eq("category", category)
+        .eq("is_archived", false),
+      supabase
+        .from("pharmacy_requests")
+        .select("medicine_name")
+        .eq("category", category)
+        .order("requested_at", { ascending: false })
+        .limit(200),
+    ]);
+
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const byName = new Map<string, SuggestedItem>();
+
+    // Priority 1: low stock (>0 but <=10 — already-empty items aren't
+    // "about to run low", they already ran out) and expiring within 30 days.
+    for (const m of (stockData ?? []) as any[]) {
+      const qty = m.total_quantity ?? 0;
+      if (qty > 0 && qty <= 10 && !byName.has(m.generic_name)) {
+        byName.set(m.generic_name, { name: m.generic_name, reason: "low_stock" });
+      }
+      if (m.nearest_expiry) {
+        const days = Math.ceil((new Date(m.nearest_expiry).getTime() - today.getTime()) / 86400000);
+        if (days <= 30 && days >= 0 && !byName.has(m.generic_name)) {
+          byName.set(m.generic_name, { name: m.generic_name, reason: "expiring" });
+        }
+      }
+    }
+
+    // Priority 2: most frequently requested names from recent history —
+    // only fills in names not already flagged above.
+    const freq = new Map<string, number>();
+    for (const r of (reqData ?? []) as any[]) {
+      freq.set(r.medicine_name, (freq.get(r.medicine_name) ?? 0) + 1);
+    }
+    const sortedFrequent = Array.from(freq.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([name]) => name);
+    for (const name of sortedFrequent) {
+      if (!byName.has(name)) byName.set(name, { name, reason: "frequent" });
+      if (byName.size >= 8) break;
+    }
+
+    setSuggestions(Array.from(byName.values()).slice(0, 8));
+  } catch {
+    setSuggestions([]);
+  }
+};
+
+useEffect(() => {
+  if (showNewRequest) loadSuggestions(itemCategory);
+}, [showNewRequest, itemCategory]);
 
   const set = (k: keyof ItemDraft, v: string | number) => setDraft(d => ({ ...d, [k]: v }));
 
@@ -588,6 +660,7 @@ setQtyText("1");
                     <th style={{ ...thStyle, textAlign: "right" }}>Qty</th>
                     <th style={thStyle}>Notes</th>
                     <th style={{ ...thStyle, textAlign: "center" }}>Status</th>
+                    <th style={thStyle}>Approved On</th>
                     <th style={{ ...thStyle, textAlign: "center" }}>Action</th>
                   </tr>
                 </thead>
@@ -605,8 +678,11 @@ setQtyText("1");
                           : `${it.requested_qty} ${it.unit}`}
                       </td>
                       <td style={{ ...tdStyle, fontSize: 11.5 }}>{it.notes || "—"}</td>
-                      <td style={{ ...tdStyle, textAlign: "center" }}><StatusPill status={it.status} /></td>
-                      <td style={{ ...tdStyle, textAlign: "center" }}>
+<td style={{ ...tdStyle, textAlign: "center" }}><StatusPill status={it.status} /></td>
+<td style={{ ...tdStyle, fontSize: 11.5, whiteSpace: "nowrap" }}>
+  {it.confirmed_at ? `${fmtDate(it.confirmed_at)} · ${fmtTime(it.confirmed_at)}` : "—"}
+</td>
+<td style={{ ...tdStyle, textAlign: "center" }}>
                         {it.status === "confirm" ? (
                           <button
                             disabled={markingId === it.id}
@@ -687,11 +763,47 @@ setQtyText("1");
               </div>
 
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <div>
-                  <label style={lbl}>{isDrugs ? "Generic Name" : "Supply Name"}</label>
-                  <input value={draft.medicine} onChange={e => set("medicine", e.target.value)} placeholder={isDrugs ? "e.g. Paracetamol" : "e.g. Face Mask"} style={inp} />
-                </div>
-
+                <div style={{ position: "relative" }}>
+  <label style={lbl}>{isDrugs ? "Generic Name" : "Supply Name"}</label>
+  <input
+    value={draft.medicine}
+    onChange={e => set("medicine", e.target.value)}
+    onFocus={() => setShowSuggestions(true)}
+    onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+    placeholder={isDrugs ? "e.g. Paracetamol" : "e.g. Face Mask"}
+    style={inp}
+  />
+  {showSuggestions && !draft.medicine.trim() && suggestions.length > 0 && (
+    <div style={{
+      position: "absolute", top: "100%", left: 0, right: 0, marginTop: 4, zIndex: 30,
+      background: t.modalBg, border: `1.5px solid ${t.border2}`, borderRadius: 10,
+      maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+    }}>
+      {suggestions.map((s, i) => {
+        const r = REASON_LABEL[s.reason];
+        return (
+          <button
+            key={s.name}
+            type="button"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => { set("medicine", s.name); setShowSuggestions(false); }}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+              width: "100%", textAlign: "left", padding: "9px 12px",
+              border: "none", borderBottom: i < suggestions.length - 1 ? `1px solid ${t.border2}` : "none",
+              background: "transparent", cursor: "pointer", fontFamily: "inherit",
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = t.surface2 ?? "#f6faf7")}
+            onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+          >
+            <span style={{ fontSize: 12.5, fontWeight: 700, color: t.text }}>{s.name}</span>
+            <span style={{ background: r.bg, color: r.color, fontSize: 9, fontWeight: 800, borderRadius: 20, padding: "2px 7px", whiteSpace: "nowrap", flexShrink: 0 }}>{r.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  )}
+</div>
                 {/* Drugs-only: Brand Name + Dosage. Supplies skip straight to Type/Unit/Qty. */}
                 {isDrugs && (
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>

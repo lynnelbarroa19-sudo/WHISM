@@ -5,25 +5,7 @@ import { useAuth } from '@/context/AuthContext'
 import { useTheme } from '../lib/pharmacy'
 import { supabase } from '@/lib/supabase'
 
-type Tab = "profile" | "password" | "notifications";
-
-type NotificationPrefs = {
-  low_stock: boolean;
-  expiring_soon: boolean;
-  request_confirmed: boolean;
-  request_rejected: boolean;
-  request_alerted: boolean;
-  email_enabled: boolean;
-};
-
-const DEFAULT_PREFS: NotificationPrefs = {
-  low_stock: true,
-  expiring_soon: true,
-  request_confirmed: true,
-  request_rejected: true,
-  request_alerted: true,
-  email_enabled: false,
-};
+type Tab = "profile" | "password";
 
 function EyeIcon({ visible }: { visible: boolean }) {
   return visible ? (
@@ -69,49 +51,6 @@ const XIcon = ({ size = 13, color = "currentColor" }: { size?: number; color?: s
     <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
   </svg>
 );
-const BellIcon = ({ size = 15, color = "currentColor" }: { size?: number; color?: string }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
-  </svg>
-);
-
-/** Simple pill toggle switch — same visual language as the rest of the app (t.green). */
-function ToggleSwitch({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
-  const { t } = useTheme();
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      style={{
-        width: 42, height: 24, borderRadius: 20, border: "none", padding: 3,
-        background: checked ? t.green : t.border2, cursor: disabled ? "not-allowed" : "pointer",
-        display: "flex", alignItems: "center", justifyContent: checked ? "flex-end" : "flex-start",
-        transition: "background 0.2s", flexShrink: 0, opacity: disabled ? 0.6 : 1,
-      }}
-    >
-      <span style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,0.25)", transition: "transform 0.2s" }} />
-    </button>
-  );
-}
-
-function NotificationRow({ label, sub, checked, onChange }: { label: string; sub: string; checked: boolean; onChange: (v: boolean) => void }) {
-  const { t } = useTheme();
-  return (
-    <div style={{
-      display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16,
-      padding: "14px 0", borderBottom: `1px solid ${t.border2}`,
-    }}>
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 700, color: t.text }}>{label}</div>
-        <div style={{ fontSize: 12, color: t.text3, marginTop: 2 }}>{sub}</div>
-      </div>
-      <ToggleSwitch checked={checked} onChange={onChange} />
-    </div>
-  );
-}
 
 export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
   const { t } = useTheme();
@@ -120,8 +59,8 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
 
   const [tab, setTab] = useState<Tab>(initialTab ?? "profile");
   const [photo, setPhoto] = useState<string | null>(null);
- const [firstName,  setFirstName]  = useState("");
-const [lastName,   setLastName]   = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("pharmacist");
   const [saving, setSaving] = useState(false);
@@ -135,11 +74,6 @@ const [lastName,   setLastName]   = useState("");
   const [showNew, setShowNew] = useState(false);
   const [showConf, setShowConf] = useState(false);
   const [pwSaving, setPwSaving] = useState(false);
-
-  const [prefs, setPrefs] = useState<NotificationPrefs>(DEFAULT_PREFS);
-  const [prefsLoaded, setPrefsLoaded] = useState(false);
-  const [prefsSaving, setPrefsSaving] = useState(false);
-  const [prefsDirty, setPrefsDirty] = useState(false);
 
   const [toast, setToast] = useState("");
   const [toastType, setToastType] = useState<"success" | "error">("success");
@@ -165,9 +99,6 @@ const [lastName,   setLastName]   = useState("");
     if (initialTab) setTab(initialTab);
   }, [initialTab]);
 
-  // authUser.id is the single source of truth for the signed-in user; the
-  // old localStorage-scraping fallback was dead weight once AuthContext
-  // is always mounted before this component renders.
   useEffect(() => {
     if (authUser?.id) setUserId(authUser.id);
   }, [authUser]);
@@ -182,26 +113,24 @@ const [lastName,   setLastName]   = useState("");
   }, []);
 
   const fetchProfile = async (uid: string) => {
-  const { data, error } = await supabase
-    .from("users")
-    .select("first_name, last_name, email, avatar_url, role, notification_prefs")
-    .eq("user_id", uid)
-    .single();
-  if (error) {
-    console.error('[Settings] fetchProfile:', error.message, '| code:', error.code, '| details:', error.details, '| hint:', error.hint);
-    showToast("Failed to load profile.", "error");
-    return;
-  }
-  if (data) {
-    setFirstName(data.first_name || "");
-    setLastName(data.last_name || "");
-    setEmail(data.email || "");
-    setRole(data.role || "pharmacist");
-    if (data.avatar_url) setPhoto(`${data.avatar_url}?t=${Date.now()}`);
-    setPrefs({ ...DEFAULT_PREFS, ...(data.notification_prefs || {}) });
-    setPrefsLoaded(true);
-  }
-};
+    const { data, error } = await supabase
+      .from("users")
+      .select("first_name, last_name, email, avatar_url, role")
+      .eq("user_id", uid)
+      .single();
+    if (error) {
+      console.error('[Settings] fetchProfile:', error.message, '| code:', error.code, '| details:', error.details, '| hint:', error.hint);
+      showToast("Failed to load profile.", "error");
+      return;
+    }
+    if (data) {
+      setFirstName(data.first_name || "");
+      setLastName(data.last_name || "");
+      setEmail(data.email || "");
+      setRole(data.role || "pharmacist");
+      if (data.avatar_url) setPhoto(`${data.avatar_url}?t=${Date.now()}`);
+    }
+  };
 
   const showToast = (msg: string, type: "success" | "error") => {
     setToast(msg); setToastType(type);
@@ -226,8 +155,16 @@ const [lastName,   setLastName]   = useState("");
       const publicUrl = urlData.publicUrl;
       const displayUrl = `${publicUrl}?t=${Date.now()}`;
 
-      const { error: updateErr } = await supabase.from("users").update({ avatar_url: publicUrl }).eq("user_id", userId);
-      if (updateErr) { showToast(`Error saving photo: ${updateErr.message}`, "error"); setUploading(false); return; }
+      const { data: updData, error: updateErr } = await supabase.from("users").update({ avatar_url: publicUrl }).eq("user_id", userId).select();
+      if (updateErr) {
+        console.error('[Settings] handlePhotoUpload update:', updateErr.message, '| code:', updateErr.code, '| details:', updateErr.details, '| hint:', updateErr.hint);
+        showToast(`Error saving photo: ${updateErr.message}`, "error"); setUploading(false); return;
+      }
+      if (!updData || updData.length === 0) {
+        console.error('[Settings] handlePhotoUpload: update matched 0 rows — likely RLS blocking this specific update.');
+        showToast("Photo saved to storage but couldn't link it to your profile (permission issue).", "error");
+        setUploading(false); return;
+      }
 
       setPhoto(displayUrl);
       window.dispatchEvent(new Event("avatarUpdated"));
@@ -267,7 +204,16 @@ const [lastName,   setLastName]   = useState("");
       const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(filePath);
       const publicUrl = urlData.publicUrl;
       const displayUrl = `${publicUrl}?t=${Date.now()}`;
-      await supabase.from("users").update({ avatar_url: publicUrl }).eq("user_id", userId);
+      const { data: updData, error: updateErr } = await supabase.from("users").update({ avatar_url: publicUrl }).eq("user_id", userId).select();
+      if (updateErr) {
+        console.error('[Settings] capturePhoto update:', updateErr.message, '| code:', updateErr.code, '| details:', updateErr.details, '| hint:', updateErr.hint);
+        showToast(`Error saving photo: ${updateErr.message}`, "error"); setUploading(false); return;
+      }
+      if (!updData || updData.length === 0) {
+        console.error('[Settings] capturePhoto: update matched 0 rows — likely RLS blocking this specific update.');
+        showToast("Photo saved to storage but couldn't link it to your profile (permission issue).", "error");
+        setUploading(false); return;
+      }
       setPhoto(displayUrl);
       window.dispatchEvent(new Event("avatarUpdated"));
       showToast("Photo saved!", "success");
@@ -276,33 +222,33 @@ const [lastName,   setLastName]   = useState("");
   };
 
   const handleSaveProfile = async () => {
-  if (!firstName.trim()) { showToast("Please enter a first name.", "error"); return; }
-  if (!lastName.trim()) { showToast("Please enter a last name.", "error"); return; }
-  if (!email.trim()) { showToast("Please enter an email.", "error"); return; }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast("Please enter a valid email.", "error"); return; }
-  if (!userId) { showToast("User not found. Please refresh.", "error"); return; }
+    if (!firstName.trim()) { showToast("Please enter a first name.", "error"); return; }
+    if (!lastName.trim()) { showToast("Please enter a last name.", "error"); return; }
+    if (!email.trim()) { showToast("Please enter an email.", "error"); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast("Please enter a valid email.", "error"); return; }
+    if (!userId) { showToast("User not found. Please refresh.", "error"); return; }
 
-  setSaving(true);
-const { data, error } = await supabase.from("users").update({
-  first_name: firstName.trim(),
-  last_name: lastName.trim(),
-  email: email.trim(),
-}).eq("user_id", userId).select();
-setSaving(false);
+    setSaving(true);
+    const { data, error } = await supabase.from("users").update({
+      first_name: firstName.trim(),
+      last_name: lastName.trim(),
+      email: email.trim(),
+    }).eq("user_id", userId).select();
+    setSaving(false);
 
-if (error) {
-  console.error('[Settings] handleSaveProfile:', error.message, '| code:', error.code, '| details:', error.details, '| hint:', error.hint);
-  showToast(error.message || "Error saving profile!", "error");
-  return;
-}
-if (!data || data.length === 0) {
-  console.error('[Settings] handleSaveProfile: update matched 0 rows — likely blocked by a Row Level Security policy on "users" for UPDATE.');
-  showToast("Save didn't actually apply — you may not have permission to edit this record (RLS).", "error");
-  return;
-}
-window.dispatchEvent(new Event("profileUpdated"));
-showToast("Profile saved successfully!", "success");
-};
+    if (error) {
+      console.error('[Settings] handleSaveProfile:', error.message, '| code:', error.code, '| details:', error.details, '| hint:', error.hint);
+      showToast(error.message || "Error saving profile!", "error");
+      return;
+    }
+    if (!data || data.length === 0) {
+      console.error('[Settings] handleSaveProfile: update matched 0 rows — likely blocked by a Row Level Security policy on "users" for UPDATE.');
+      showToast("Save didn't actually apply — you may not have permission to edit this record (RLS).", "error");
+      return;
+    }
+    window.dispatchEvent(new Event("profileUpdated"));
+    showToast("Profile saved successfully!", "success");
+  };
 
   const handleChangePassword = async () => {
     if (!currentPw) { showToast("Please enter your current password.", "error"); return; }
@@ -322,19 +268,14 @@ showToast("Profile saved successfully!", "success");
     showToast("Password changed successfully!", "success");
   };
 
-  const setPref = (key: keyof NotificationPrefs, value: boolean) => {
-    setPrefs(p => ({ ...p, [key]: value }));
-    setPrefsDirty(true);
+  // Focus/blur handlers give the inputs real visual feedback — previously the
+  // border-color transition existed in the style object but nothing ever
+  // triggered it, so focusing a field looked identical to not focusing it.
+  const handleFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.currentTarget.style.borderColor = t.green;
   };
-
-  const handleSavePrefs = async () => {
-    if (!userId) { showToast("User not found. Please refresh.", "error"); return; }
-    setPrefsSaving(true);
-    const { error } = await supabase.from("users").update({ notification_prefs: prefs }).eq("user_id", userId);
-    setPrefsSaving(false);
-    if (error) { showToast("Error saving notification settings!", "error"); return; }
-    setPrefsDirty(false);
-    showToast("Notification preferences saved!", "success");
+  const handleBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.currentTarget.style.borderColor = t.cardBorder;
   };
 
   const inputStyle: CSSProperties = {
@@ -350,11 +291,11 @@ showToast("Profile saved successfully!", "success");
     display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "10px 12px",
     borderRadius: 9, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13,
     fontWeight: active ? 700 : 500, background: active ? t.green : "transparent",
-    color: active ? "#fff" : t.text, textAlign: "left", transition: "background 0.15s", marginBottom: 4,
+    color: active ? "#fff" : t.text, textAlign: "left", transition: "background 0.15s, color 0.15s", marginBottom: 4,
   });
 
- const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
-const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2);
+  const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+  const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2);
   const roleLabel = role ? role.charAt(0).toUpperCase() + role.slice(1) : "Pharmacist";
 
   if (isLoading) return (
@@ -367,14 +308,13 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
 
       <div style={{ marginBottom: 24, flexShrink: 0 }}>
         <p style={{ fontSize: 11, fontWeight: 600, color: t.greenLight, textTransform: "uppercase", letterSpacing: ".08em", margin: 0 }}>Pharmacist</p>
-        <h1 style={{ fontSize: 32, fontWeight: 1000, color: t.greenLight, margin: "4px 0 0", lineHeight: 1 }}>SETTINGS</h1>
+        <h1 style={{ fontSize: 32, fontWeight: 1000, color: t.greenLight, margin: "4px 0 0", lineHeight: 1 }}>PROFILE</h1>
       </div>
 
-      <div style={{ display: "flex", gap: 24, alignItems: "flex-start" }}>
+      <div className="pset-layout" style={{ display: "flex", gap: 24, alignItems: "flex-start" }}>
 
         {/* Left sidebar nav */}
-        <div style={{ width: 240, background: t.cardBg, borderRadius: 16, padding: "20px 16px", boxShadow: "0 1px 8px rgba(0,0,0,.07)", border: `1px solid ${t.cardBorder}`, flexShrink: 0 }}>
-          <p style={{ fontSize: 10, fontWeight: 700, color: t.greenLight, textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 14, paddingLeft: 4, marginTop: 0 }}>Settings</p>
+        <div className="pset-sidebar" style={{ width: 240, background: t.cardBg, borderRadius: 16, padding: "20px 16px", boxShadow: "0 1px 8px rgba(0,0,0,.07)", border: `1px solid ${t.cardBorder}`, flexShrink: 0 }}>
 
           <div style={{ display: "flex", alignItems: "center", gap: 10, background: t.dispenseCard, borderRadius: 10, padding: "10px 12px", marginBottom: 20, border: `1px solid ${t.border}` }}>
             <div style={{ width: 40, height: 40, borderRadius: "50%", overflow: "hidden", background: t.green + "22", flexShrink: 0, border: `2px solid ${t.green}` }}>
@@ -383,42 +323,38 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
                 : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 700, color: t.greenLight }}>{initials}</div>}
             </div>
             <div style={{ minWidth: 0 }}>
-             <div style={{ fontSize: 13, fontWeight: 700, color: t.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{fullName || authUser.name || "Pharmacist"}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: t.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{fullName || authUser.name || "Pharmacist"}</div>
               <div style={{ fontSize: 11, color: t.text3 }}>{roleLabel}</div>
             </div>
           </div>
 
-          <button style={sideTabStyle(tab === "profile")} onClick={() => setTab("profile")}>
+          <button className="pset-tab" style={sideTabStyle(tab === "profile")} onClick={() => setTab("profile")}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
             </svg>
             User Profile
           </button>
-          <button style={sideTabStyle(tab === "password")} onClick={() => setTab("password")}>
+          <button className="pset-tab" style={sideTabStyle(tab === "password")} onClick={() => setTab("password")}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
             </svg>
             Password
           </button>
-          <button style={sideTabStyle(tab === "notifications")} onClick={() => setTab("notifications")}>
-            <BellIcon size={15} />
-            Notifications
-          </button>
         </div>
 
         {/* Right content */}
-        <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 20 }}>
+        <div className="pset-content" style={{ flex: 1, minWidth: 0, display: "flex", gap: 20 }}>
 
           <div style={{ flex: 1, background: t.cardBg, borderRadius: 16, padding: "36px 40px", boxShadow: "0 1px 8px rgba(0,0,0,.07)", border: `1px solid ${t.cardBorder}` }}>
 
             {tab === "profile" && (
               <>
                 <div style={{ marginBottom: 28 }}>
-                  <div style={{ fontSize: 22, fontWeight: 800, color: t.text }}>User Profile</div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: t.text }}>USER PROFILE</div>
                   <div style={{ fontSize: 13, color: t.text3, marginTop: 4 }}>Update your display name, email, and profile photo.</div>
                 </div>
 
-                <div style={{ display: "flex", alignItems: "center", gap: 20, marginBottom: 32 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 20, marginBottom: 32, flexWrap: "wrap" }}>
                   <div style={{ position: "relative", flexShrink: 0 }}>
                     <div style={{ width: 90, height: 90, borderRadius: "50%", overflow: "hidden", border: `3px solid ${t.green}`, background: t.green + "22" }}>
                       {photo
@@ -435,7 +371,7 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
                   <div>
                     <div style={{ fontSize: 14, fontWeight: 600, color: t.text, marginBottom: 10 }}>Profile Photo</div>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-                      <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading} style={{
+                      <button type="button" className="pset-btn-fill" onClick={() => fileRef.current?.click()} disabled={uploading} style={{
                         display: "flex", alignItems: "center", gap: 6, background: t.green, color: "#fff", border: "none",
                         borderRadius: 20, padding: "8px 20px", fontSize: 13, fontWeight: 600,
                         cursor: uploading ? "not-allowed" : "pointer", fontFamily: "inherit", opacity: uploading ? 0.7 : 1,
@@ -443,7 +379,7 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
                         <UploadIcon size={14} color="#fff" />
                         {uploading ? "Uploading…" : "Change Photo"}
                       </button>
-                      <button type="button" onClick={openCamera} disabled={uploading} style={{
+                      <button type="button" className="pset-btn-outline" onClick={openCamera} disabled={uploading} style={{
                         display: "flex", alignItems: "center", gap: 6, background: "transparent", color: t.green,
                         border: `1.5px solid ${t.green}`, borderRadius: 20, padding: "8px 20px", fontSize: 13, fontWeight: 600,
                         cursor: "pointer", fontFamily: "inherit",
@@ -458,26 +394,26 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px 24px", marginBottom: 20 }}>
-  <div>
-    <label style={labelStyle}>First Name</label>
-    <input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} placeholder="Enter first name" style={inputStyle} autoComplete="off" name="profile-first-name" />
-  </div>
-  <div>
-    <label style={labelStyle}>Last Name</label>
-    <input type="text" value={lastName} onChange={e => setLastName(e.target.value)} placeholder="Enter last name" style={inputStyle} autoComplete="off" name="profile-last-name" />
-  </div>
-  <div>
-    <label style={labelStyle}>Email</label>
-    <input type="text" value={email} onChange={e => setEmail(e.target.value)} placeholder="Enter email" style={inputStyle} autoComplete="off" name="profile-email" />
-  </div>
-</div>
+                  <div>
+                    <label style={labelStyle}>First Name</label>
+                    <input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} onFocus={handleFocus} onBlur={handleBlur} placeholder="Enter first name" style={inputStyle} autoComplete="off" name="profile-first-name" />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Last Name</label>
+                    <input type="text" value={lastName} onChange={e => setLastName(e.target.value)} onFocus={handleFocus} onBlur={handleBlur} placeholder="Enter last name" style={inputStyle} autoComplete="off" name="profile-last-name" />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Email</label>
+                    <input type="text" value={email} onChange={e => setEmail(e.target.value)} onFocus={handleFocus} onBlur={handleBlur} placeholder="Enter email" style={inputStyle} autoComplete="off" name="profile-email" />
+                  </div>
+                </div>
 
                 <div style={{ marginBottom: 32 }}>
                   <label style={labelStyle}>Role</label>
                   <input type="text" value={roleLabel} readOnly style={{ ...inputStyle, background: t.tableRowBorder, color: t.text3, cursor: "not-allowed" }} />
                 </div>
 
-                <button type="button" onClick={handleSaveProfile} disabled={saving} style={{
+                <button type="button" className="pset-btn-fill" onClick={handleSaveProfile} disabled={saving} style={{
                   display: "flex", alignItems: "center", gap: 7, background: saving ? t.greenLight : t.green,
                   color: "#fff", border: "none", borderRadius: 22, padding: "11px 30px", fontSize: 13, fontWeight: 700,
                   cursor: saving ? "not-allowed" : "pointer", fontFamily: "inherit", transition: "background 0.2s",
@@ -507,10 +443,10 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
                     <div style={{ position: "relative" }}>
                       <input
                         type={show ? "text" : "password"} name={`pw-field-${i}`} autoComplete={ac} value={value}
-                        onChange={e => (setter as (v: string) => void)(e.target.value)} placeholder={placeholder}
+                        onChange={e => (setter as (v: string) => void)(e.target.value)} onFocus={handleFocus} onBlur={handleBlur} placeholder={placeholder}
                         style={{ ...inputStyle, paddingRight: 44 }}
                       />
-                      <button type="button" onClick={toggle} style={{
+                      <button type="button" aria-label={show ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`} onClick={toggle} style={{
                         position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)",
                         border: "none", background: "none", cursor: "pointer", color: t.text3, padding: 0, display: "flex",
                       }}>
@@ -520,7 +456,7 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
                   </div>
                 ))}
 
-                <button type="button" onClick={handleChangePassword}
+                <button type="button" className="pset-btn-fill" onClick={handleChangePassword}
                   disabled={pwSaving || !req.length || !req.special || !req.number || !req.match}
                   style={{
                     display: "flex", alignItems: "center", gap: 7, background: t.green, color: "#fff", border: "none",
@@ -534,72 +470,6 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
               </>
             )}
 
-            {tab === "notifications" && (
-              <>
-                <div style={{ marginBottom: 28 }}>
-                  <div style={{ fontSize: 22, fontWeight: 800, color: t.text }}>Notifications</div>
-                  <div style={{ fontSize: 13, color: t.text3, marginTop: 4 }}>Choose which alerts you want to receive while using SmartRHU.</div>
-                </div>
-
-                <div style={{ marginBottom: 10, fontSize: 11, fontWeight: 700, color: t.text3, textTransform: "uppercase", letterSpacing: ".07em" }}>Inventory Alerts</div>
-                <div style={{ marginBottom: 24 }}>
-                  <NotificationRow
-                    label="Low Stock"
-                    sub="Alert when a medicine or supply drops to 10 units or below."
-                    checked={prefs.low_stock}
-                    onChange={v => setPref("low_stock", v)}
-                  />
-                  <NotificationRow
-                    label="Expiring Soon"
-                    sub="Alert when a batch is within 30 days of its expiration date."
-                    checked={prefs.expiring_soon}
-                    onChange={v => setPref("expiring_soon", v)}
-                  />
-                </div>
-
-                <div style={{ marginBottom: 10, fontSize: 11, fontWeight: 700, color: t.text3, textTransform: "uppercase", letterSpacing: ".07em" }}>Restock Requests</div>
-                <div style={{ marginBottom: 24 }}>
-                  <NotificationRow
-                    label="Request Confirmed"
-                    sub="Notify me when Warehouse confirms a restock request I sent."
-                    checked={prefs.request_confirmed}
-                    onChange={v => setPref("request_confirmed", v)}
-                  />
-                  <NotificationRow
-                    label="Request Alerted"
-                    sub="Notify me when Warehouse flags a request for my attention."
-                    checked={prefs.request_alerted}
-                    onChange={v => setPref("request_alerted", v)}
-                  />
-                  <NotificationRow
-                    label="Request Rejected"
-                    sub="Notify me when Warehouse rejects a restock request."
-                    checked={prefs.request_rejected}
-                    onChange={v => setPref("request_rejected", v)}
-                  />
-                </div>
-
-                <div style={{ marginBottom: 10, fontSize: 11, fontWeight: 700, color: t.text3, textTransform: "uppercase", letterSpacing: ".07em" }}>Delivery Method</div>
-                <div style={{ marginBottom: 32 }}>
-                  <NotificationRow
-                    label="Email Notifications"
-                    sub={`Also send these alerts to ${email || "your email"}, in addition to in-app alerts.`}
-                    checked={prefs.email_enabled}
-                    onChange={v => setPref("email_enabled", v)}
-                  />
-                </div>
-
-                <button type="button" onClick={handleSavePrefs} disabled={prefsSaving || !prefsDirty} style={{
-                  display: "flex", alignItems: "center", gap: 7,
-                  background: (prefsSaving || !prefsDirty) ? t.greenLight : t.green,
-                  color: "#fff", border: "none", borderRadius: 22, padding: "11px 30px", fontSize: 13, fontWeight: 700,
-                  cursor: (prefsSaving || !prefsDirty) ? "not-allowed" : "pointer", fontFamily: "inherit",
-                  opacity: (prefsSaving || !prefsDirty) ? 0.6 : 1, transition: "background 0.2s",
-                }}>
-                  {prefsSaving ? <><SpinnerIcon size={13} color="#fff" /> Saving…</> : <><CheckIcon size={13} color="#fff" /> Save Preferences</>}
-                </button>
-              </>
-            )}
           </div>
 
           {tab === "password" && (
@@ -634,7 +504,7 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
               <span style={{ color: "#fff", fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
                 <CameraIcon size={16} color="#fff" /> Take Photo
               </span>
-              <button type="button" onClick={stopCamera} style={{ border: "none", background: "rgba(255,255,255,.2)", color: "#fff", width: 28, height: 28, borderRadius: 7, cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <button type="button" aria-label="Close camera" onClick={stopCamera} style={{ border: "none", background: "rgba(255,255,255,.2)", color: "#fff", width: 28, height: 28, borderRadius: 7, cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <XIcon size={13} color="#fff" />
               </button>
             </div>
@@ -661,6 +531,7 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
           background: toastType === "success" ? t.green : "#ef4444", color: "#fff", borderRadius: 12, padding: "12px 20px",
           fontSize: 13, fontWeight: 600, fontFamily: "inherit", boxShadow: "0 8px 24px rgba(0,0,0,.18)",
           display: "flex", alignItems: "center", gap: 8, animation: "slideUp 0.25s ease",
+          maxWidth: "calc(100vw - 40px)",
         }}>
           {toastType === "success" ? <CheckIcon size={14} color="#fff" /> : <XIcon size={14} color="#fff" />}
           {toast}
@@ -670,6 +541,23 @@ const initials = (fullName || authUser?.name || "P").split(" ").map((w: string) 
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes slideUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
+
+        /* Hover feedback for sidebar tabs — active tab keeps its solid green
+           background; inactive tabs get a soft tint on hover so the whole
+           nav feels interactive instead of just the currently-selected item. */
+        .pset-tab:not([style*="background: rgb"]):hover {
+          background: rgba(0,0,0,0.04) !important;
+        }
+        .pset-btn-fill:not(:disabled):hover { filter: brightness(0.94); }
+        .pset-btn-outline:not(:disabled):hover { background: rgba(0,0,0,0.03) !important; }
+
+        /* Stack sidebar above content on narrow viewports instead of
+           overflowing horizontally. */
+        @media (max-width: 720px) {
+          .pset-layout { flex-direction: column; }
+          .pset-sidebar { width: 100% !important; }
+          .pset-content { flex-direction: column !important; }
+        }
       `}</style>
     </div>
   );

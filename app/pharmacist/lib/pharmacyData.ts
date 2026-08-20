@@ -67,6 +67,17 @@ export async function fetchMedicinesWithBatches(): Promise<MedicineWithBatches[]
   }));
 }
 
+export async function fetchSeasonalInsights(currentMonth: number) {
+  const { data, error } = await supabase
+    .from("pharma_seasonal_index")
+    .select("medicine_id, generic_name, month_num, total_qty, seasonal_index")
+    .eq("month_num", currentMonth)
+    .gt("seasonal_index", 1.3)
+    .order("seasonal_index", { ascending: false })
+    .limit(6);
+  if (error) throw error;
+  return data ?? [];
+}
 export async function fetchArchivedMedicines(): Promise<MedicineWithBatches[]> {
   const { data, error } = await supabase
     .from("pharma_medicines")
