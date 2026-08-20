@@ -18,12 +18,28 @@ interface BarangayRecommendationRow {
 interface StockReserveRow {
   medicine_name: string
   unit: string
+  current_stock_sa_warehouse?: number
+}
+
+// Aggregate (no barangay names) split per medicine -- includes
+// `leftover_units`, the remainder from floor division that is NOT handed
+// out to any barangay (strict equal-for-all policy: everyone gets the
+// exact same `units_per_barangay`, nothing more). That remainder stays
+// in the warehouse.
+interface EqualDistributionRow {
+  medicine_name: string
+  unit: string
+  available_for_distribution: number
+  units_per_barangay: number
+  leftover_units: number
 }
 
 interface PredictResponse {
   number_of_barangays: number
   barangay_recommendation_exact: BarangayRecommendationRow[]
   barangay_recommendation_buffered: BarangayRecommendationRow[]
+  barangay_equal_distribution_exact: EqualDistributionRow[]
+  barangay_equal_distribution_buffered: EqualDistributionRow[]
   stock_and_reserve_summary: StockReserveRow[]
 }
 
@@ -77,6 +93,7 @@ export default function BarangayDistributionCard() {
   const [bufferMode, setBufferMode] = useState<BufferMode>('exact')
   const [planMode, setPlanMode] = useState<PlanMode>('auto')
   const [activeMed, setActiveMed] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
 
   // ---- Manual mode state ----
   const [manualPlan, setManualPlan] = useState<ManualPlan>({})
@@ -137,6 +154,17 @@ export default function BarangayDistributionCard() {
 
   const autoGroups = useMemo(() => groupByMedicine(autoRows), [autoRows])
 
+  // Natitirang stock na HINDI ibinigay sa kahit kaninong barangay (strict
+  // equal split -- tingnan ang barangay_distribution.py), per medicine.
+  const leftoverByMed = useMemo(() => {
+    const rows = bufferMode === 'exact'
+      ? data?.barangay_equal_distribution_exact || []
+      : data?.barangay_equal_distribution_buffered || []
+    const map = new Map<string, number>()
+    for (const r of rows) map.set(r.medicine_name, r.leftover_units)
+    return map
+  }, [data, bufferMode])
+
   const allMedicineNames = useMemo(() => {
     const fromStock = (data?.stock_and_reserve_summary || []).map(r => r.medicine_name)
     const fromAuto = autoGroups.map(g => g.medicine_name)
@@ -165,6 +193,18 @@ export default function BarangayDistributionCard() {
   }, [data, autoGroups])
   const unitFor = (medName: string) => unitByMed.get(medName) || 'unit'
 
+  // Totoong KABUUANG stock sa warehouse (mula sa medicine_batches, hindi
+  // katulad ng "leftover" mula sa equal-split) -- para maipakita bilang
+  // context sa tabi ng leftover figure, hindi na kailangang lumipat pa sa
+  // Demand Forecast card para makita.
+  const totalStockByMed = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const r of data?.stock_and_reserve_summary || []) {
+      if (typeof r.current_stock_sa_warehouse === 'number') map.set(r.medicine_name, r.current_stock_sa_warehouse)
+    }
+    return map
+  }, [data])
+
   const groups = planMode === 'auto' ? autoGroups : null
 
   useEffect(() => {
@@ -180,6 +220,19 @@ export default function BarangayDistributionCard() {
   }, [planMode, autoGroups, allMedicineNames])
 
   const activeGroup = groups?.find(g => g.medicine_name === activeMed) || null
+
+  // Barangay-name search box sa step 2 (auto: filters the recommendation
+  // rows for the active medicine; manual: filters the full barangay list).
+  const filteredAutoRows = useMemo(() => {
+    const rows = activeGroup?.rows || []
+    const q = query.trim().toLowerCase()
+    return q ? rows.filter(r => r.barangay_name.toLowerCase().includes(q)) : rows
+  }, [activeGroup, query])
+
+  const filteredBarangayList = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return q ? barangayList.filter(b => b.barangay_name.toLowerCase().includes(q)) : barangayList
+  }, [barangayList, query])
 
   const setManualQty = (medName: string, destId: string, qty: number) => {
     setManualPlan(prev => ({
@@ -251,10 +304,38 @@ export default function BarangayDistributionCard() {
         body: JSON.stringify({ source: planMode, rows }),
       })
       const json = await res.json()
+
       if (!res.ok) {
-        setSaveMsg({ type: 'error', text: json.error || 'Hindi na-save ang distribution plan.' })
+        // >>> FIX: dati, `json.detail` (ang TUNAY na error mula sa
+        // FastAPI backend, hal. Supabase constraint violation o
+        // mismatched medicine_id) ay tinatapon lang -- `json.error`
+        // (generic label na "Hindi na-save ang distribution plan.")
+        // lang ang ipinapakita sa card. Kaya kahit ano pang mangyari sa
+        // backend, parehong walang-detalyeng message lang ang lumalabas.
+        // Ngayon, isinasama na ang `detail` (string man o object) sa
+        // ipinapakitang error, para direktang makita ang totoong dahilan
+        // sa card mismo, hindi na kailangan pang buksan ang DevTools. <<<
+        const detailText = typeof json.detail === 'string'
+          ? json.detail
+          : json.detail
+            ? JSON.stringify(json.detail)
+            : ''
+        setSaveMsg({
+          type: 'error',
+          text: [json.error, detailText].filter(Boolean).join(' — ') || 'Hindi na-save ang distribution plan.',
+        })
       } else {
-        setSaveMsg({ type: 'ok', text: `Na-save: ${json.barangay_rows_saved ?? rows.length} na barangay allocation.` })
+        // >>> FIX: "192 na barangay allocation" ay nakakalito -- akala
+        // mo lumagpas sa 96 barangay. Ang totoong ibig sabihin: 192 ROWS
+        // (bawat barangay ay may allocation PER MEDICINE -- 96 barangay
+        // x 2 gamot = 192 rows). I-breakdown na lang para malinaw. <<<
+        const medCount = new Set(rows.map(r => r.medicine_name)).size
+        const brgyCount = new Set(rows.map(r => r.destination_id)).size
+        const rowsSaved = json.barangay_rows_saved ?? rows.length
+        setSaveMsg({
+          type: 'ok',
+          text: `Na-save: ${brgyCount} barangay × ${medCount} gamot = ${rowsSaved} allocation.`,
+        })
       }
     } catch (err) {
       console.error('confirm-distribution error:', err)
@@ -381,7 +462,28 @@ export default function BarangayDistributionCard() {
 
                       {planMode === 'auto' ? (
                         <div style={{ fontSize: 9.5, color: 'var(--text3)', marginTop: 2 }}>
-                          {autoG ? `${autoG.perBarangayBase} ${autoG.unit} × ${autoG.barangayCount} brgy` : 'Walang matitira'}
+                          {autoG ? (
+                            <>
+                              {autoG.perBarangayBase} {autoG.unit} × {autoG.barangayCount} brgy
+                              {/* Strict equal split -- lahat pareho ang tanggap, walang
+                                  +1 kahit kanino. Ang leftover mula sa floor division ay
+                                  hindi ibinigay -- nananatili sa warehouse.
+
+                                  >>> FIX: dating "(11 pcs natitira sa warehouse)" ay
+                                  nagpapamukhang para bang 11 na lang ang TOTAL na stock --
+                                  malinaw na ito ay LEFTOVER lang mula sa hating-pantay,
+                                  hindi ang buong stock. Idinagdag ang totoong total stock
+                                  bilang context, at binago ang salita mula "natitira sa
+                                  warehouse" (malabo) papuntang "leftover, hindi kasali sa
+                                  split" (mas malinaw). <<< */}
+                              {(leftoverByMed.get(medName) || 0) > 0 && (
+                                <span> (+{leftoverByMed.get(medName)} {autoG.unit} leftover, hindi kasali sa split)</span>
+                              )}
+                              {totalStockByMed.has(medName) && (
+                                <div>Kabuuang stock: {totalStockByMed.get(medName)} {autoG.unit}</div>
+                              )}
+                            </>
+                          ) : 'Walang matitira'}
                         </div>
                       ) : (
                         <>
@@ -413,29 +515,37 @@ export default function BarangayDistributionCard() {
                     )}
                   </div>
 
-                  {planMode === 'manual' && (
-                    <div style={{ display: 'flex', gap: 6, marginTop: 6, flexShrink: 0 }}>
-                      <input
-                        value={fillAllValue}
-                        onChange={e => setFillAllValue(e.target.value.replace(/[^0-9]/g, ''))}
-                        placeholder="Qty"
-                        style={{ ...inputStyle, width: 48, textAlign: 'center' }}
-                      />
-                      <button onClick={fillAllForActiveMed} style={fillAllButtonStyle} title="Ilagay ang quantity na ito sa LAHAT ng barangay">
-                        Fill All
-                      </button>
-                      <button onClick={clearActiveMed} style={clearButtonStyle} title="Burahin lahat ng nilagay para sa gamot na ito">
-                        ✕
-                      </button>
-                    </div>
-                  )}
+                  <div style={{ display: 'flex', gap: 6, marginTop: 6, flexShrink: 0 }}>
+                    <input
+                      value={query}
+                      onChange={e => setQuery(e.target.value)}
+                      placeholder="Hanapin ang barangay..."
+                      style={{ ...inputStyle, flex: 1, boxSizing: 'border-box' }}
+                    />
+                    {planMode === 'manual' && (
+                      <>
+                        <input
+                          value={fillAllValue}
+                          onChange={e => setFillAllValue(e.target.value.replace(/[^0-9]/g, ''))}
+                          placeholder="Qty"
+                          style={{ ...inputStyle, width: 48, textAlign: 'center' }}
+                        />
+                        <button onClick={fillAllForActiveMed} style={fillAllButtonStyle} title="Ilagay ang quantity na ito sa LAHAT ng barangay">
+                          Fill All
+                        </button>
+                        <button onClick={clearActiveMed} style={clearButtonStyle} title="Burahin lahat ng nilagay para sa gamot na ito">
+                          ✕
+                        </button>
+                      </>
+                    )}
+                  </div>
 
                   <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 3, marginTop: 6 }}>
                     {planMode === 'auto' ? (
-                      (activeGroup?.rows.length ?? 0) === 0 ? (
-                        <div style={rowEmptyStyle}>Walang barangay na matitira para sa gamot na ito.</div>
+                      filteredAutoRows.length === 0 ? (
+                        <div style={rowEmptyStyle}>Walang nahanap na barangay.</div>
                       ) : (
-                        activeGroup!.rows.map(r => (
+                        filteredAutoRows.map(r => (
                           <div key={r.destination_id} style={rowStyle}>
                             <span style={rowLabelStyle}>{r.barangay_name}</span>
                             <span style={{ fontWeight: 700, color: '#16a34a', flexShrink: 0, marginLeft: 6, fontVariantNumeric: 'tabular-nums' }}>
@@ -444,10 +554,10 @@ export default function BarangayDistributionCard() {
                           </div>
                         ))
                       )
-                    ) : barangayList.length === 0 ? (
-                      <div style={rowEmptyStyle}>Walang barangay na nakalista.</div>
+                    ) : filteredBarangayList.length === 0 ? (
+                      <div style={rowEmptyStyle}>Walang nahanap na barangay.</div>
                     ) : (
-                      barangayList.map(b => {
+                      filteredBarangayList.map(b => {
                         const val = manualPlan[activeMed]?.[b.destination_id] ?? 0
                         const hasVal = val > 0
                         return (
@@ -495,6 +605,7 @@ export default function BarangayDistributionCard() {
               fontSize: 10.5, padding: '5px 8px', borderRadius: 6,
               background: saveMsg.type === 'ok' ? '#dcfce7' : '#fee2e2',
               color: saveMsg.type === 'ok' ? '#16a34a' : '#dc2626',
+              wordBreak: 'break-word',
             }}>
               {saveMsg.type === 'ok' ? '✓ ' : '⚠ '}{saveMsg.text}
             </div>

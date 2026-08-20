@@ -13,8 +13,10 @@ BAKIT HIWALAY:
     Lopez na "EQUAL FOR ALL" ito, walang paboritismo, walang weighting
     base sa population/distance/kahit ano. Simpleng:
 
-        available_stock // 96  (base share bawat barangay)
-        available_stock %  96  (leftover, ibinibigay nang +1 sa ilan)
+        available_stock // 96  (base share bawat barangay -- EKSAKTONG
+                                 ito lang ang tanggap ng LAHAT, walang +1)
+        available_stock %  96  (leftover -- nananatili sa warehouse,
+                                 HINDI ibinibigay sa kahit kaninong barangay)
 
     Kaya PURA ARITHMETIC lang ang kailangan dito -- walang model na
     kailangang i-train, walang .pkl na kailangang i-load. Kung sakaling
@@ -98,15 +100,15 @@ def build_equal_barangay_recommendation(
 
     `barangay_list` -- output ng fetch_barangay_list_from_destinations()
 
-    PAANO HINAHATI ANG LEFTOVER: +1 EXTRA na unit sa UNANG `leftover_units`
-    na barangay sa listahan (naka-sort by name). Simple at predictable --
-    walang paboritismo, at consistent kada run (parehong barangay laging
-    unang nakakatanggap ng extra kung magkasing-available ang stock).
-
-    Kung sa hinaharap ay gusto ng RHU ng ROTATION (iba-ibang barangay ang
-    nakakatanggap ng extra kada forecast run, para mas patas sa mahabang
-    panahon), DITO LANG babaguhin ang paraan ng pag-assign ng extra --
-    walang kinalaman ang ML dito, purong sequencing/rotation logic lang.
+    PAANO HINAHATI ANG LEFTOVER: HINDI ito ibinibigay sa kahit kaninong
+    barangay. Lahat ng 96 barangay ay tumatanggap ng EKSAKTONG PAREHONG
+    `units_per_barangay` (floor division lang) -- walang +1 kahit kanino,
+    kaya walang barangay na "swerte" na mas marami ang tanggap. Ang
+    `leftover_units` (0 hanggang num_barangays-1) ay NANANATILI sa
+    warehouse -- bahagi pa rin ito ng available stock, pero sadyang hindi
+    isinasama sa recommendation dahil hindi ito pwedeng hatiin nang
+    eksaktong pantay (RHU Lopez policy: "EQUAL FOR ALL", walang
+    paboritismo, kahit sa pamamagitan ng random/rotating na +1).
     """
     recommendation = []
     for d in distribution_list:
@@ -114,18 +116,16 @@ def build_equal_barangay_recommendation(
             continue  # walang matitira para dito -- walang irerecommend
 
         base_qty = d["units_per_barangay"]
-        leftover = d["leftover_units"]
+        if base_qty <= 0:
+            continue  # kulang pa sa 1 bawat barangay kahit patas na hatiin
 
-        for idx, brgy in enumerate(barangay_list):
-            qty = base_qty + (1 if idx < leftover else 0)
-            if qty <= 0:
-                continue
+        for brgy in barangay_list:
             recommendation.append({
                 "destination_id": brgy.get("destination_id"),
                 "barangay_name": brgy.get("destination_name"),
                 "medicine_name": d["medicine_name"],
                 "unit": d.get("unit", "unit"),
-                "recommended_quantity": int(qty),
+                "recommended_quantity": int(base_qty),
             })
 
     return recommendation
@@ -161,8 +161,7 @@ def attach_equal_split(medicine_name: str, available: int, num_barangays: int, u
 # Ang STAFF ang huling desisyon dito, hindi ML at hindi na rin plain
 # arithmetic -- kaya ang function sa ibaba ay 'dumb save' lang: kung ano
 # ang ipinasa (galing man sa recommendation na sinunod nang buo, o
-# ganap na tinype ng staff mula sa wala), yun din ang isesave, status
-# = 'confirmed'.
+# ganap na tinype ng staff mula sa wala), yun din ang isesave.
 #
 # May DALAWANG source lang, at HINDI PWEDENG MAGHALO ang isang plan
 # (base sa desisyon ng RHU Lopez):
@@ -171,6 +170,25 @@ def attach_equal_split(medicine_name: str, available: int, num_barangays: int, u
 #   - "manual" -> ganap na pinili ng warehouse staff ang gamot at
 #                 quantity bawat barangay
 #
+# >>> MAHALAGANG PAALALA (nahanap habang nagde-debug ng
+# "demand_forecasts_status_check"/"barangay_distributions_status_check"
+# violations): dalawang MAGKAIBANG konsepto ang tinatrack ng status sa
+# DALAWANG table na ito -- hindi dapat parehong "confirmed":
+#
+#   - demand_forecasts.status: tumatrack ng DESISYON (draft -> confirmed
+#     ng staff). Dito TAMA ang "confirmed".
+#
+#   - barangay_distributions.status: tumatrack ng PHYSICAL DELIVERY
+#     lifecycle (CHECK constraint sa DB: 'pending' -> 'distributed' ->
+#     'received' LANG ang allowed values -- walang "confirmed"). Kapag
+#     na-confirm ng staff ang plano, HINDI pa ito physically naipapadala
+#     sa mga barangay -- plano pa lang ito. Kaya ang TAMANG status dito
+#     ay "pending" (naghihintay pang i-distribute), hindi "confirmed".
+#     Ang pag-update papuntang "distributed" o "received" ay dapat
+#     mangyari sa ibang bahagi ng app (hal. kapag talagang naihatid na
+#     o na-confirm receipt ng barangay), hindi dito sa oras ng
+#     pag-confirm ng warehouse staff ng distribution PLAN. <<<
+#
 def save_confirmed_distribution(
     supabase_client,
     rows: List[dict],
@@ -178,8 +196,8 @@ def save_confirmed_distribution(
     forecast_period_days: int = 30,
 ) -> dict:
     """
-    I-save ang FINAL na distribution plan (auto o manual) bilang
-    'confirmed' sa 'barangay_distributions' table.
+    I-save ang FINAL na distribution plan (auto o manual) sa
+    'barangay_distributions' table.
 
     `rows` -- listahan ng dict, bawat isa ay:
         { destination_id, medicine_name, quantity }
@@ -188,10 +206,13 @@ def save_confirmed_distribution(
 
     Muling gumagamit ng 'demand_forecasts' table bilang PARENT record
     per medicine (required ng foreign key ng barangay_distributions),
-    pero may sariling model_version/status para malinaw na hindi ito
-    ML prediction:
-        - status='confirmed' (hindi 'draft')
-        - model_version='auto-confirmed' o 'manual-override'
+    pero may sariling model_version para malinaw na hindi ito ML
+    prediction:
+        - demand_forecasts.status = 'confirmed' (hindi 'draft')
+        - demand_forecasts.model_version = 'auto-confirmed' o
+          'manual-override'
+        - barangay_distributions.status = 'pending' (naghihintay pang
+          physically i-distribute -- tingnan ang paalala sa itaas)
 
     Ibinabalik: { status, medicines_saved, barangay_rows_saved }
     """
@@ -215,7 +236,10 @@ def save_confirmed_distribution(
     import pandas as pd  # local import -- iwas circular/unused sa module load kung minsan hindi kailangan
     today = pd.Timestamp.today().normalize()
     end_date = today + pd.Timedelta(days=forecast_period_days)
-    forecast_period = f"{today.strftime('%Y-%m-%d')}_to_{end_date.strftime('%Y-%m-%d')}"
+    # "YYYYMMDD-YYYYMMDD" (17 chars) -- dating "YYYY-MM-DD_to_YYYY-MM-DD"
+    # (24 chars) ay sumasabog sa demand_forecasts.forecast_period, na
+    # varchar(20) lang sa DB (Postgres error 22001 "value too long").
+    forecast_period = f"{today.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
 
     model_version = "auto-confirmed" if source == "auto" else "manual-override"
 
@@ -225,19 +249,29 @@ def save_confirmed_distribution(
         if medicine_id is None:
             print(f"[WARN] Walang match na medicine_id para sa '{med_name}' -- ski-skip sa confirm.")
             continue
+        # `base_forecast_quantity`/`buffer_percentage` ay NOT NULL sa DB,
+        # pero wala nang access dito sa orihinal na ML base/buffer na
+        # pinagmulan ng plan na ito (auto man o manual) -- naka-log na
+        # 'yun nang hiwalay bilang status='draft' na row sa panahon ng
+        # /predict-distribution (tingnan ang log_predictions_to_supabase()
+        # sa api_server.py). Kaya 0/0.0 dito -- "hindi tinatrack sa
+        # confirmed row na ito", hindi "walang forecast talaga".
         fc_resp = supabase_client.table("demand_forecasts").insert({
             "medicine_id": medicine_id,
             "forecast_period": forecast_period,
-            "base_forecast_quantity": None,
-            "buffer_percentage": None,
+            "base_forecast_quantity": 0,
+            "buffer_percentage": 0.0,
             "recommended_quantity": total_qty,
             "model_version": model_version,
+            # demand_forecasts_status_check ay pinayagan na ang 'confirmed'
+            # (na-ALTER na sa Supabase) -- TAMA ito dito, desisyon ng staff
+            # ang tinatrack ng column na ito.
             "status": "confirmed",
         }).execute()
         if fc_resp.data:
             forecast_id_by_med[med_name] = fc_resp.data[0]["forecast_id"]
 
-    # ---------- 3. Insert ang bawat barangay row, status='confirmed' ----------
+    # ---------- 3. Insert ang bawat barangay row ----------
     dist_rows = []
     for r in rows:
         qty = int(r["quantity"])
@@ -253,7 +287,15 @@ def save_confirmed_distribution(
             "medicine_id": medicine_id,
             "destination_id": r["destination_id"],
             "quantity": qty,
-            "status": "confirmed",
+            # >>> FIX: "confirmed" dati -- pero ang
+            # barangay_distributions_status_check ay 'pending'/
+            # 'distributed'/'received' LANG ang allowed. Ang plano ay
+            # naka-set na (na-confirm ng staff), pero HINDI pa ito
+            # physically naipadala -- "pending" pa rin ito sa delivery
+            # lifecycle. Ang pag-update papuntang 'distributed'/'received'
+            # ay dapat gawin ng ibang parte ng app kapag totoong
+            # naihatid/na-confirm receipt na. <<<
+            "status": "pending",
         })
 
     if dist_rows:

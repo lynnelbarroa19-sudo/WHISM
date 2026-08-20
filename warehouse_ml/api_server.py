@@ -123,21 +123,39 @@ def fetch_barangay_count_from_destinations() -> int:
     return count if count and count > 0 else 96
 
 
-def fetch_medicine_units() -> Dict[str, str]:
+def fetch_medicine_catalog() -> Dict[str, Dict[str, str]]:
     """
-    Kunin ang TOTOONG unit ng bawat gamot mula sa 'medicines' table
-    (hal. "Piece", "Bottle", "Box", "Loose", "Strip") -- ito ang
-    ipapalit sa dating generic na "u" sa Demand Forecast at Barangay
+    Kunin ang TOTOONG unit AT category ng bawat gamot mula sa 'medicines'
+    table (hal. unit: "Piece", "Bottle", "Box", "Loose", "Strip") -- ito
+    ang ipapalit sa dating generic na "u" sa Demand Forecast at Barangay
     Distribution cards, para tumugma sa TALAGANG nasa medicine
     inventory, hindi basta paikot na label.
+
+    Ginagamit din ito para bigyan ng unit/category ang mga BAGONG gamot
+    na wala pang laman sa ML model (tingnan ang live-merge sa
+    /predict-distribution) -- kaya kasama rin ang LAHAT ng gamot dito,
+    hindi lang yung nasa training data.
     """
     sb = get_supabase()
     if sb is None:
         return {}
-    resp = sb.table("medicines").select("generic_name, unit").execute()
+    resp = sb.table("medicines").select("generic_name, unit, category").execute()
     if not resp.data:
         return {}
-    return {row["generic_name"]: (row.get("unit") or "unit") for row in resp.data}
+    catalog = {}
+    for row in resp.data:
+        # 'medicines.category' ay singular ("drug"/"supply"), samantalang
+        # 'pharmacy_requests.category' (galing sa ML training data) ay
+        # plural ("drugs"/"supplies") -- i-normalize papuntang plural
+        # para magkatugma sa PredictionCard.tsx grouping.
+        cat = (row.get("category") or "drugs").strip().lower()
+        if not cat.endswith("s"):
+            cat += "s"
+        catalog[row["generic_name"]] = {
+            "unit": row.get("unit") or "unit",
+            "category": cat,
+        }
+    return catalog
 
 
 def fetch_pending_committed_requests() -> Dict[str, int]:
@@ -301,9 +319,12 @@ def predict_distribution(req: PredictRequest):
     # na-receive) -- ito ay babawasin din sa warehouse balang araw
     pending_committed = fetch_pending_committed_requests()
 
-    # Totoong unit ng bawat gamot (Piece/Bottle/Box/Loose/Strip/atbp.)
-    # mula sa 'medicines' table -- ipapalit sa dating generic na "u"
-    unit_by_med = fetch_medicine_units()
+    # Totoong unit/category ng bawat gamot (Piece/Bottle/Box/Loose/Strip/
+    # atbp.) mula sa 'medicines' table -- ipapalit sa dating generic na "u",
+    # AT ginagamit din para bigyan ng unit/category ang mga bagong gamot na
+    # wala pang laman sa ML model (tingnan ang LIVE MERGE sa ibaba)
+    medicine_catalog = fetch_medicine_catalog()
+    unit_by_med = {name: info["unit"] for name, info in medicine_catalog.items()}
 
     events_df = build_pharmacy_request_forecast(req.forecast_days_ahead)
 
@@ -341,6 +362,53 @@ def predict_distribution(req: PredictRequest):
     total_demand = total_demand.sort_values("total_predicted_pharmacy_request", ascending=False)
     total_demand["unit"] = total_demand["medicine_name"].map(unit_by_med).fillna("unit")
 
+    # ---------- D.1) LIVE DEMAND SUMMARY (para lang sa Demand tab) --------
+    # `total_demand` sa itaas ay PURONG ML prediction at hindi na ito
+    # babaguhin pa -- ginagamit pa rin ito nang walang pagbabago sa Reserve
+    # computation sa ibaba (Section E), para hindi ma-double count doon ang
+    # TIYAK na commitment (`pending_committed`, na hiwalay nang idinaragdag
+    # doon bilang `pending_qty`).
+    #
+    # Dito naman, gumagawa tayo ng HIWALAY na bersyon PARA LANG SA
+    # pharmacy_demand_summary (ang Demand tab sa UI) na naglalagay AGAD ng
+    # bawat totoong open request (status pending/confirm/alerted) -- bago
+    # man o dati nang gamot -- kahit hindi pa 'received'/na-retrain ang ML
+    # model dito. Kung mas malaki ang totoong open request kaysa sa
+    # ML-predicted na demand, ito ang gagamitin; kung bagong-bagong gamot
+    # na wala pang laman sa model, ang totoong open-request quantity na
+    # lang ang gagamitin bilang panandaliang demand figure.
+    demand_by_med = {
+        row["medicine_name"]: {
+            "medicine_category": row["medicine_category"],
+            "total_predicted_pharmacy_request": row["total_predicted_pharmacy_request"],
+        }
+        for row in total_demand.to_dict(orient="records")
+    }
+    for med, live_qty in pending_committed.items():
+        if live_qty <= 0:
+            continue
+        if med in demand_by_med:
+            demand_by_med[med]["total_predicted_pharmacy_request"] = max(
+                demand_by_med[med]["total_predicted_pharmacy_request"], live_qty
+            )
+        else:
+            cat_info = medicine_catalog.get(med, {})
+            demand_by_med[med] = {
+                "medicine_category": cat_info.get("category", "drugs"),
+                "total_predicted_pharmacy_request": live_qty,
+            }
+
+    demand_summary_live = pd.DataFrame([
+        {"medicine_name": med, **vals} for med, vals in demand_by_med.items()
+    ])
+    live_total_all = demand_summary_live["total_predicted_pharmacy_request"].sum()
+    demand_summary_live["percentage_of_total_predicted_requests"] = (
+        (demand_summary_live["total_predicted_pharmacy_request"] / live_total_all * 100).round(2)
+        if live_total_all > 0 else 0
+    )
+    demand_summary_live["unit"] = demand_summary_live["medicine_name"].map(unit_by_med).fillna("unit")
+    demand_summary_live = demand_summary_live.sort_values("total_predicted_pharmacy_request", ascending=False)
+
     # ---------- E) RESERVE PARA SA PHARMACY (EXACT + BUFFERED) ----------
     # ---------- F) MATITIRA -> EQUAL SPLIT SA BAWAT BARANGAY ----------
     num_brgy = num_brgy_final
@@ -348,10 +416,28 @@ def predict_distribution(req: PredictRequest):
     distribution_exact = []
     distribution_buffered = []
 
-    for med, stock in current_stock.items():
+    # Isama rin dito ang mga gamot na may TUNAY na open request
+    # (pending/confirm/alerted) pero WALA pang laman sa warehouse
+    # (stock = 0) -- hal. bagong-bagong request na hindi pa na-stock kailanman.
+    # Kung hindi ito isasama, hindi makikita sa Reserve tab ang isang malinaw
+    # na SHORTAGE case (0 stock, may totoong demand).
+    meds_with_new_requests = {med for med, qty in pending_committed.items() if qty > 0}
+    all_meds_for_reserve = sorted(set(current_stock) | meds_with_new_requests)
+
+    for med in all_meds_for_reserve:
+        stock = current_stock.get(med, 0)
         pred_row = total_demand[total_demand["medicine_name"] == med]
         predicted_pharmacy_request = int(pred_row["total_predicted_pharmacy_request"].values[0]) if len(pred_row) else 0
-        unit = unit_by_med.get(med, "unit")
+
+        # `stock` (from fetch_current_stock_from_supabase) is always a sum of
+        # medicine_batches.total_quantity, which is a PIECES count (boxes *
+        # pieces_per_box + loose_pieces -- see medicinestock/page.tsx). It is
+        # NOT denominated in `medicines.unit` (a free-text packaging label
+        # like "Box" chosen when the medicine was added). Labeling the stock
+        # figure with `unit` made e.g. "99 pieces" display as "99 Box",
+        # which doesn't match the real box count on the Inventory page --
+        # so the stock/reserve/available figures below use "pcs" instead.
+        stock_unit = "pcs"
 
         # (A) TIYAK na commitment -- pending/confirm/alerted na requests
         #     na hindi pa na-receive, kaya hindi pa nababawas sa stock
@@ -361,20 +447,31 @@ def predict_distribution(req: PredictRequest):
         # RESERVE = TIYAK na commitment + PREDICTED future demand
         reserve_exact = pending_qty + predicted_pharmacy_request
         available_exact = max(0, stock - reserve_exact)
-        pct_available_exact = round((available_exact / stock * 100), 2) if stock > 0 else 0
-        pct_reserved_exact = round((reserve_exact / stock * 100), 2) if stock > 0 else 0
+        if stock > 0:
+            pct_available_exact = round((available_exact / stock * 100), 2)
+            pct_reserved_exact = round((reserve_exact / stock * 100), 2)
+        else:
+            # Walang stock (hal. bagong-bagong gamot na hindi pa na-stock
+            # kailanman) -- 100% reserved kung may demand, 0% kung wala,
+            # sa halip na 0/0 -> 0% na mukhang "walang kailangang i-reserve".
+            pct_available_exact = 0
+            pct_reserved_exact = 100 if reserve_exact > 0 else 0
 
         # Buffered version: ang TIYAK na commitment ay walang buffer
         # (dahil totoo na ito), pero ang PREDICTED part ay bibigyan ng
         # +15% safety margin
         reserve_buffered = pending_qty + round(predicted_pharmacy_request * (1 + req.safety_buffer_percent))
         available_buffered = max(0, stock - reserve_buffered)
-        pct_available_buffered = round((available_buffered / stock * 100), 2) if stock > 0 else 0
-        pct_reserved_buffered = round((reserve_buffered / stock * 100), 2) if stock > 0 else 0
+        if stock > 0:
+            pct_available_buffered = round((available_buffered / stock * 100), 2)
+            pct_reserved_buffered = round((reserve_buffered / stock * 100), 2)
+        else:
+            pct_available_buffered = 0
+            pct_reserved_buffered = 100 if reserve_buffered > 0 else 0
 
         result_per_medicine.append({
             "medicine_name": med,
-            "unit": unit,
+            "unit": stock_unit,
             "current_stock_sa_warehouse": stock,
             "pending_committed_requests": pending_qty,
             "predicted_future_pharmacy_request": predicted_pharmacy_request,
@@ -391,9 +488,16 @@ def predict_distribution(req: PredictRequest):
 
         # ---------- PLAIN ARITHMETIC mula rito pababa -- WALANG ML.
         # `attach_equal_split()` (barangay_distribution.py) ay floor
-        # division + remainder lang, batay sa "equal for all" na policy. ----------
-        distribution_exact.append(attach_equal_split(med, available_exact, num_brgy, unit))
-        distribution_buffered.append(attach_equal_split(med, available_buffered, num_brgy, unit))
+        # division + remainder lang, batay sa "equal for all" na policy.
+        #
+        # `available_exact`/`available_buffered` = `stock` (PIECES) minus
+        # reserve, so they're PIECES too -- same reasoning as `stock_unit`
+        # above. Labeling the per-barangay split with `unit` (e.g. "Box")
+        # made "5 Box x 96 brgy" look like 480 BOXES needed, when it's
+        # really 480 PIECES (~5 real boxes) being split across barangays.
+        # ----------
+        distribution_exact.append(attach_equal_split(med, available_exact, num_brgy, stock_unit))
+        distribution_buffered.append(attach_equal_split(med, available_buffered, num_brgy, stock_unit))
 
     # ---------- G) TUNAY NA PER-BARANGAY RECOMMENDATION (barangay_distribution.py) ----------
     # Hindi lang aggregate/bilang -- listahan na ng SINONG barangay
@@ -423,7 +527,7 @@ def predict_distribution(req: PredictRequest):
         "predicted_pharmacy_requests_monthly": monthly.sort_values(["year", "month"]).to_dict(orient="records"),
 
         # bilang, uri, percentage ng total predicted pharmacy requests
-        "pharmacy_demand_summary": total_demand.to_dict(orient="records"),
+        "pharmacy_demand_summary": demand_summary_live.to_dict(orient="records"),
 
         # (2) Reserve computation -- ilang percent/bilang ilalaan para sa pharmacy
         "stock_and_reserve_summary": result_per_medicine,
@@ -462,10 +566,13 @@ def log_predictions_to_supabase(
     name_to_id = {row["generic_name"]: row["medicine_id"] for row in med_resp.data}
 
     # ---------- 2. Forecast period bilang rolling window (hal.
-    # '2026-08-17_to_2026-09-16') ----------
+    # '20260817-20260916'). "YYYYMMDD-YYYYMMDD" (17 chars) dahil ang
+    # demand_forecasts.forecast_period ay varchar(20) lang sa DB -- ang
+    # dating "YYYY-MM-DD_to_YYYY-MM-DD" (24 chars) ay sumasabog dito
+    # (Postgres error 22001 "value too long"). ----------
     today = pd.Timestamp.today().normalize()
     end_date = today + pd.Timedelta(days=forecast_days_ahead)
-    forecast_period = f"{today.strftime('%Y-%m-%d')}_to_{end_date.strftime('%Y-%m-%d')}"
+    forecast_period = f"{today.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
 
     # ---------- 3. Insert sa demand_forecasts (status: draft), isa
     # bawat gamot; itago ang forecast_id para gamitin sa distributions ----------
@@ -579,6 +686,13 @@ def confirm_distribution(req: ConfirmDistributionRequest):
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except Exception as e:
+        # Kahit anong DB-level na error (hal. Postgres constraint violation)
+        # ay dating tumatakas dito bilang plain-text 500 -- sinisira nito
+        # ang res.json() ng Next.js proxy (nagreresulta sa maling "Hindi
+        # ma-reach ang ML service"). I-wrap bilang JSON HTTPException para
+        # makita ang TUNAY na dahilan.
+        raise HTTPException(500, f"Hindi na-save ang distribution plan: {e}")
 
     return result
 
