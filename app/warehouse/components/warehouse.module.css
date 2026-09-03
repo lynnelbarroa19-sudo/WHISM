@@ -1749,6 +1749,41 @@
   font-weight: 400;
 }
 
+/* Tab buttons in PredictionCard — subtle hover lift + focus ring on top
+   of the active/inactive colors already set inline per-tab. */
+.predTabBtn { position: relative; outline: none; }
+.predTabBtn:hover { filter: brightness(1.06); transform: translateY(-1px); }
+.predTabBtn:active { transform: translateY(0); filter: brightness(0.97); }
+.predTabBtn:focus-visible { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--green); }
+
+.predRefreshBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  color: var(--green);
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+  font-family: "DM Sans", sans-serif;
+}
+.predRefreshBtn:hover:not(:disabled) { background: var(--green-light); }
+.predRefreshBtn:disabled { cursor: default; opacity: .65; }
+
+.predFooter {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
 /* Type combobox dropdown (search-as-you-type) */
 .comboDrop {
   position: absolute;

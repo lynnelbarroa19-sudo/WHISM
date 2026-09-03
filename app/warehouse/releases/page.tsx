@@ -40,12 +40,15 @@
 // piece-equivalent of 1 box) before this fix.
 //
 // CHANGED: "Confirm Receipt" no longer takes an ID photo upload. It
-// uses a mouse/finger-drawn digital signature (SignaturePad) as proof
-// of receipt. The signature PNG is stored in the existing
-// id_picture_url column on `releases` (repurposed — the column name is
-// unchanged in the DB, but it now holds a signature image instead of a
-// photographed ID), and confirmation_method is set to
-// 'digital_signature' to match.
+// uses a mouse/finger/pen-drawn digital signature (SignaturePad) as
+// proof of receipt, captured via the Pointer Events API so it works
+// with a mouse, a finger on a touchscreen, OR an external USB/digital
+// signature pad's pen (Wacom-style, Topaz, generic HID pointer pads,
+// etc.) without needing separate code paths per input type. The
+// signature PNG is stored in the existing id_picture_url column on
+// `releases` (repurposed — the column name is unchanged in the DB, but
+// it now holds a signature image instead of a photographed ID), and
+// confirmation_method is set to 'digital_signature' to match.
 //
 // REMOVED: The separate "Approve Release" step is gone. A release no
 // longer needs a warehouse-staff signature before it can be claimed —
@@ -103,6 +106,15 @@
 // e.g. "1 Box"), falling back to the old raw `quantity` + medicine
 // `unit` only for legacy rows created before release_items had those
 // two columns. See formatQty() below and NOTE 3 above.
+//
+// FIXED (signature pad drawing bug): the tablet/pen input path used to
+// rely on Pointer Lock + relative-movement ("delta") tracking, which
+// produced broken, jumpy, disconnected strokes for many users instead
+// of a smooth continuous signature. SignaturePad has been rewritten so
+// mouse, touch, AND pen all draw through the SAME simple code path —
+// direct canvas-relative coordinates from the pointer event, exactly
+// like the old mouse/touch path already did. There is no more Pointer
+// Lock, no virtual pen position, and no window-level pen listener.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useTheme } from 'next-themes'
@@ -463,10 +475,27 @@ const DEST_TYPE_COLORS: Record<DestinationType, string> = {
 }
 
 // ============================================================
-// Signature pad — lets the claimant sign with a mouse/touch instead
-// of uploading a photo. Exposes an imperative handle (via forwardRef)
-// so the parent modal can pull out a PNG blob, check whether anything
-// was drawn, and clear the pad without prop-drilling canvas state.
+// Signature pad — lets the claimant sign using ANY pointer device:
+// a mouse, a finger on a touchscreen, or the pen from an external
+// graphics/signature tablet (XP-Pen, Wacom, Topaz, generic HID
+// pointer-emulating pads, etc). Built on the Pointer Events API,
+// with ONE shared code path for mouse, touch, AND pen: every stroke
+// is drawn directly from the pointer's real, canvas-relative
+// coordinates. There is no Pointer Lock, no relative "delta"
+// tracking, and no virtual pen position — those made tablet strokes
+// come out broken and jumpy, since a lifted/re-touched pen combined
+// with movement-based drawing could easily desync from where the
+// user was actually pointing. Plain coordinate-based drawing has no
+// such failure mode: wherever the pointer physically is, that's
+// where the line is drawn, for every device.
+//
+// If the pad also reports pressure (most do), stroke width responds
+// to how hard the pen is pressed, so the line looks like an actual
+// ballpen signature instead of a uniform marker line.
+//
+// Exposes an imperative handle (via forwardRef) so the parent modal
+// can pull out a PNG blob, check whether anything was drawn, and clear
+// the pad without prop-drilling canvas state.
 // ============================================================
 
 interface SignaturePadHandle {
@@ -482,7 +511,10 @@ const SignaturePad = React.forwardRef<
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const drawingRef = useRef(false)
   const hasDrawnRef = useRef(false)
-  const lastPointRef = useRef<{ x: number; y: number } | null>(null)
+  // Last real pointer position, in canvas-relative CSS pixels. This is
+  // the single source of truth for where the next line segment starts
+  // from — used identically for mouse, touch, and pen.
+  const lastPosRef = useRef<{ x: number; y: number } | null>(null)
 
   const bdr = dk ? T.borderDk : T.border
   const bg = dk ? T.bgDk : T.bg
@@ -511,47 +543,63 @@ const SignaturePad = React.forwardRef<
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const getPos = (e: React.MouseEvent | React.TouchEvent) => {
+  // Pressure-aware stroke width: pen/signature-pad hardware reports a
+  // 0–1 pressure value, so a harder press draws a thicker line — just
+  // like a real ballpen. Plain mice/fingers report pressure 0 (or
+  // sometimes a flat 0.5), so they fall back to a fixed clean width.
+  const widthForPressure = (p: number) => (p > 0 ? 1.4 + p * 2.4 : 2.2)
+
+  const getPos = (e: React.PointerEvent) => {
     const canvas = canvasRef.current!
     const rect = canvas.getBoundingClientRect()
-    if ('touches' in e) {
-      const t = e.touches[0]
-      return { x: t.clientX - rect.left, y: t.clientY - rect.top }
-    }
-    return { x: (e as React.MouseEvent).clientX - rect.left, y: (e as React.MouseEvent).clientY - rect.top }
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top }
   }
 
-  const start = (e: React.MouseEvent | React.TouchEvent) => {
+  // ---- ONE code path for mouse, touch, AND pen. ----
+  // Every device draws at its real, canvas-relative position — a mouse,
+  // a finger, and a signature-pad pen are all exactly where they
+  // visually appear, so none of them need Pointer Lock or any kind of
+  // absolute→relative remapping. Lifting and re-touching the pointer
+  // mid-signature naturally continues from wherever it lands next
+  // (e.g. for a "t" crossbar or an "i" dot) since we simply reset
+  // `lastPosRef` on pointerup and re-seed it on the next pointerdown.
+  const onCanvasDown = (e: React.PointerEvent) => {
+    if (!e.isPrimary) return
     e.preventDefault()
+    const canvas = canvasRef.current!
+    canvas.setPointerCapture(e.pointerId)
+    lastPosRef.current = getPos(e)
     drawingRef.current = true
-    lastPointRef.current = getPos(e)
   }
 
-  const move = (e: React.MouseEvent | React.TouchEvent) => {
-    if (!drawingRef.current) return
+  const onCanvasMove = (e: React.PointerEvent) => {
+    if (!drawingRef.current || !e.isPrimary || !lastPosRef.current) return
     e.preventDefault()
-    const canvas = canvasRef.current
-    if (!canvas) return
+    const canvas = canvasRef.current!
     const ctx = canvas.getContext('2d')
-    if (!ctx) return
     const pos = getPos(e)
-    const last = lastPointRef.current
-    if (last) {
+    if (ctx) {
+      ctx.lineWidth = widthForPressure(e.pressure || 0.5)
       ctx.beginPath()
-      ctx.moveTo(last.x, last.y)
+      ctx.moveTo(lastPosRef.current.x, lastPosRef.current.y)
       ctx.lineTo(pos.x, pos.y)
       ctx.stroke()
     }
-    lastPointRef.current = pos
+    lastPosRef.current = pos
     if (!hasDrawnRef.current) {
       hasDrawnRef.current = true
       onChange(true)
     }
   }
 
-  const end = () => {
+  const onCanvasUp = (e: React.PointerEvent) => {
+    if (!e.isPrimary) return
     drawingRef.current = false
-    lastPointRef.current = null
+    lastPosRef.current = null
+    const canvas = canvasRef.current
+    if (canvas?.hasPointerCapture?.(e.pointerId)) {
+      canvas.releasePointerCapture(e.pointerId)
+    }
   }
 
   const clear = () => {
@@ -560,6 +608,8 @@ const SignaturePad = React.forwardRef<
     const ctx = canvas.getContext('2d')
     if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height)
     hasDrawnRef.current = false
+    lastPosRef.current = null
+    drawingRef.current = false
     onChange(false)
   }
 
@@ -584,14 +634,11 @@ const SignaturePad = React.forwardRef<
       >
         <canvas
           ref={canvasRef}
-          style={{ width: '100%', height, display: 'block' }}
-          onMouseDown={start}
-          onMouseMove={move}
-          onMouseUp={end}
-          onMouseLeave={end}
-          onTouchStart={start}
-          onTouchMove={move}
-          onTouchEnd={end}
+          style={{ width: '100%', height, display: 'block', touchAction: 'none' }}
+          onPointerDown={onCanvasDown}
+          onPointerMove={onCanvasMove}
+          onPointerUp={onCanvasUp}
+          onPointerCancel={onCanvasUp}
         />
       </div>
       <button
@@ -831,7 +878,7 @@ export default function ReleasesPage() {
       return
     }
     if (!receiveHasSignature || receiveSignaturePadRef.current?.isEmpty()) {
-      setReceiveError('Please sign using your mouse or finger before confirming.')
+      setReceiveError('Please sign using your mouse, finger, or signature pad before confirming.')
       return
     }
 
@@ -1200,7 +1247,7 @@ export default function ReleasesPage() {
                                   {g.status === 'pending' && (
                                     <button
                                       onClick={() => openReceiveModal(g)}
-                                      title="Confirm receipt (requires the claimant's mouse/finger signature — covers every medicine in this release)"
+                                      title="Confirm receipt (requires the claimant's signature — mouse, finger, or signature pad — covers every medicine in this release)"
                                       style={{ border: `1.5px solid ${bdr}`, background: card, borderRadius: T.radiusSm, padding: '6px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 700, color: T.green }}
                                       onMouseEnter={(e) => { e.currentTarget.style.background = T.greenLight; e.currentTarget.style.borderColor = T.green }}
                                       onMouseLeave={(e) => { e.currentTarget.style.background = card; e.currentTarget.style.borderColor = bdr }}
@@ -1266,19 +1313,22 @@ export default function ReleasesPage() {
           {/* ── Confirm Receipt modal — the ONLY signing step now.
               The claimant (the person picking up the medicine) fills in
               their own details and signs ONCE, covering every medicine
-              line under this release_id. For a bulk barangay dispense
-              this modal is opened once PER BARANGAY, since each barangay
-              is its own release_id with its own claimant. ── */}
+              line under this release_id. Signing works with a mouse,
+              a finger, or an external digital signature pad's pen,
+              since SignaturePad is built on the Pointer Events API.
+              For a bulk barangay dispense this modal is opened once
+              PER BARANGAY, since each barangay is its own release_id
+              with its own claimant. ── */}
           {receiveTarget && (
             <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 3000, padding: 16 }} onClick={closeReceiveModal}>
-              <div style={{ background: card, borderRadius: T.radius, width: '100%', maxWidth: 420, maxHeight: '90vh', overflowY: 'auto', boxShadow: shadow, border: `1px solid ${bdr}` }} onClick={(e) => e.stopPropagation()}>
+              <div style={{ background: card, borderRadius: T.radius, width: '100%', maxWidth: 680, maxHeight: '92vh', overflowY: 'auto', boxShadow: shadow, border: `1px solid ${bdr}` }} onClick={(e) => e.stopPropagation()}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '18px 20px', borderBottom: `1px solid ${bdr}`, background: T.greenDark, borderRadius: `${T.radius}px ${T.radius}px 0 0` }}>
                   <h2 style={{ fontSize: 16, margin: 0, color: '#fff', fontWeight: 900 }}>Confirm Receipt</h2>
                   <button onClick={closeReceiveModal} style={{ border: 'none', background: 'rgba(74,222,128,0.15)', cursor: 'pointer', color: T.mint, width: 30, height: 30, borderRadius: T.radiusSm, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><X size={15} /></button>
                 </div>
                 <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
                   <div style={{ fontSize: 11, color: txt2, background: bg, border: `1px solid ${bdr}`, borderRadius: T.radiusSm, padding: '8px 10px' }}>
-                    Have the person claiming this release fill in their own details and sign below. One signature covers all {receiveTarget.items.length} medicine{receiveTarget.items.length !== 1 ? 's' : ''} in this release.
+                    Have the person claiming this release fill in their own details and sign below (mouse, finger, or signature pad). One signature covers all {receiveTarget.items.length} medicine{receiveTarget.items.length !== 1 ? 's' : ''} in this release.
                   </div>
 
                   <div style={{ fontSize: 11, color: txt2 }}>
@@ -1308,8 +1358,8 @@ export default function ReleasesPage() {
                   </div>
 
                   <div>
-                    <label style={{ fontSize: 12, fontWeight: 700, color: txt2, marginBottom: 6, display: 'block' }}>Claimant's Signature (sign with mouse or finger) *</label>
-                    <SignaturePad key={receiveSignaturePadKey} ref={receiveSignaturePadRef} dk={dk} onChange={setReceiveHasSignature} />
+                    <label style={{ fontSize: 12, fontWeight: 700, color: txt2, marginBottom: 6, display: 'block' }}>Claimant's Signature (mouse, finger, or signature pad) *</label>
+                    <SignaturePad key={receiveSignaturePadKey} ref={receiveSignaturePadRef} dk={dk} onChange={setReceiveHasSignature} height={320} />
                   </div>
 
                   {receiveError && <div style={{ color: T.red, fontSize: 12, fontWeight: 600 }}>{receiveError}</div>}
