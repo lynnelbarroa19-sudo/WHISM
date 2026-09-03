@@ -5,32 +5,41 @@ import styles from './warehouse.module.css'
 // ---- Response shape returned by /api/warehouse-predict (proxies to
 // warehouse_ml/api_server.py's POST /predict-distribution). Ito yung
 // TUNAY na per-barangay recommendation -- WALANG ML dito, plain
-// arithmetic lang mula sa barangay_distribution.py (equal split +
-// leftover allocation). ----
+// arithmetic lang mula sa barangay_distribution.py (CASCADING box ->
+// strip -> piece equal split + leftover allocation). ----
 interface BarangayRecommendationRow {
   destination_id: string
   barangay_name: string
   medicine_name: string
   unit: string
-  recommended_quantity: number
+  recommended_quantity: number       // total sa PIECES (para sa DB storage)
+  recommended_boxes: number
+  recommended_strips: number
+  recommended_pieces: number
 }
 
 interface StockReserveRow {
   medicine_name: string
   unit: string
   current_stock_sa_warehouse?: number
+  // >>> BAGO: kailangan ito para malaman kung ilang pieces ang 1 box/
+  // strip ng gamot na ito -- ginagamit sa Manual mode para i-convert
+  // ang tina-type (box/strip/pcs) papuntang pieces bago i-save. <<<
+  pieces_per_box?: number | null
+  pieces_per_strip?: number | null
 }
 
-// Aggregate (no barangay names) split per medicine -- includes
-// `leftover_units`, the remainder from floor division that is NOT handed
-// out to any barangay (strict equal-for-all policy: everyone gets the
-// exact same `units_per_barangay`, nothing more). That remainder stays
-// in the warehouse.
+// Aggregate (no barangay names) split per medicine -- cascading box/strip/
+// piece breakdown + `leftover_units`, ang natitirang PIECES na hindi na
+// mahahati pantay-pantay (pinakamaliit na unit na, HINDI ibinigay sa
+// kahit kaninong barangay -- nananatili sa warehouse).
 interface EqualDistributionRow {
   medicine_name: string
   unit: string
   available_for_distribution: number
-  units_per_barangay: number
+  boxes_per_barangay: number
+  strips_per_barangay: number
+  pieces_per_barangay: number
   leftover_units: number
 }
 
@@ -45,14 +54,100 @@ interface PredictResponse {
 
 type BufferMode = 'exact' | 'buffered'
 type PlanMode = 'auto' | 'manual'
+// >>> BAGO: unit na ginagamit habang nagtu-type sa Manual mode.
+// Palaging naka-store ang manualPlan sa PIECES sa ilalim ng lahat --
+// ito lang ang nagbabago kung PAANO binabasa/isinusulat ang value. <<<
+type InputUnit = 'box' | 'strip' | 'pcs'
 
 interface MedicineGroup {
   medicine_name: string
   unit: string
   barangayCount: number
   totalUnits: number
-  perBarangayBase: number
+  perBarangayBoxes: number
+  perBarangayStrips: number
+  perBarangayPieces: number
+  // >>> BAGO: total sa PIECES na natatanggap ng ISANG barangay (boxes +
+  // strips + pcs, lahat pinagsama sa piece equivalent) -- ito ang
+  // "= X pcs total" na idinadagdag natin sa display, para malinaw kahit
+  // may box/strip na component ang breakdown.
+  perBarangayTotalPieces: number
   rows: BarangayRecommendationRow[]
+}
+
+// >>> BAGO: ipakita ang cascading breakdown bilang "X box + Y strip +
+// Z pcs" -- direkta nang naka-compute ang boxes/strips/pieces mula sa
+// backend (hindi na kailangang i-convert pa mula sa raw pieces).
+//
+// >>> BAGO PA: kung MIXED units ang breakdown (may box at/o strip
+// kasama ang pcs), idinadagdag ang eksaktong "(= N pcs total)" sa
+// dulo, para laging malinaw ang totoong dami kahit boxes/strips pa
+// ang laman -- ito yung hiniling na "gusto ko merong naka box, strips
+// at total pcs". Kung pcs lang naman talaga ang laman (walang box/
+// strip), hindi na kailangan pang ulitin ang parehong number. <<<
+function formatPackagingBreakdown(
+  boxes: number,
+  strips: number,
+  pieces: number,
+  totalPieces?: number
+): string {
+  const parts: string[] = []
+  if (boxes > 0) parts.push(`${boxes} box${boxes !== 1 ? 'es' : ''}`)
+  if (strips > 0) parts.push(`${strips} strip${strips !== 1 ? 's' : ''}`)
+  if (pieces > 0 || parts.length === 0) parts.push(`${pieces} pcs`)
+
+  const breakdown = parts.join(' + ')
+  const isMixedUnits = boxes > 0 || strips > 0
+
+  if (isMixedUnits && typeof totalPieces === 'number') {
+    return `${breakdown} (= ${totalPieces.toLocaleString()} pcs total)`
+  }
+  return breakdown
+}
+
+// >>> BAGO: kinukuha ang TOTAL na available stock PARA SA BARANGAY
+// DISTRIBUTION (available_for_distribution -- ibig sabihin, kasama pa
+// ang leftover, HINDI lang ang per-barangay na bahagi), tapos ika-
+// convert papuntang "X box + Y strip + Z pcs" gamit ang totoong
+// pieces_per_box/pieces_per_strip ng gamot. Cascading conversion din
+// ito (box muna, tapos strip mula sa natira, tapos pcs) -- kapareho
+// ng logic sa formatBoxStripPiece() sa PredictionCard.tsx, para
+// magkatugma ang dalawang card. Kung walang box/strip packaging info
+// ang gamot, plain pieces na lang ang ipapakita. <<<
+function formatTotalAvailableBreakdown(
+  totalPieces: number,
+  piecesPerBox?: number | null,
+  piecesPerStrip?: number | null
+): string {
+  if (totalPieces <= 0) return '0 pcs'
+
+  const hasBox = !!piecesPerBox && piecesPerBox > 0
+  const hasStrip = !!piecesPerStrip && piecesPerStrip > 0
+
+  if (!hasBox && !hasStrip) {
+    return `${totalPieces.toLocaleString()} pcs`
+  }
+
+  let remaining = totalPieces
+  const parts: string[] = []
+
+  if (hasBox) {
+    const boxes = Math.floor(remaining / piecesPerBox!)
+    remaining -= boxes * piecesPerBox!
+    if (boxes > 0) parts.push(`${boxes} box${boxes !== 1 ? 'es' : ''}`)
+  }
+
+  if (hasStrip) {
+    const strips = Math.floor(remaining / piecesPerStrip!)
+    remaining -= strips * piecesPerStrip!
+    if (strips > 0) parts.push(`${strips} strip${strips !== 1 ? 's' : ''}`)
+  }
+
+  if (remaining > 0 || parts.length === 0) {
+    parts.push(`${remaining} pcs`)
+  }
+
+  return parts.join(' + ')
 }
 
 function groupByMedicine(rows: BarangayRecommendationRow[]): MedicineGroup[] {
@@ -65,20 +160,23 @@ function groupByMedicine(rows: BarangayRecommendationRow[]): MedicineGroup[] {
   return Array.from(map.entries())
     .map(([medicine_name, rs]) => {
       const totalUnits = rs.reduce((sum, r) => sum + r.recommended_quantity, 0)
-      const perBarangayBase = Math.min(...rs.map(r => r.recommended_quantity))
+      const first = rs[0]
       return {
         medicine_name,
-        unit: rs[0]?.unit || 'unit',
+        unit: first?.unit || 'unit',
         barangayCount: rs.length,
         totalUnits,
-        perBarangayBase,
+        perBarangayBoxes: first?.recommended_boxes ?? 0,
+        perBarangayStrips: first?.recommended_strips ?? 0,
+        perBarangayPieces: first?.recommended_pieces ?? 0,
+        perBarangayTotalPieces: first?.recommended_quantity ?? 0,
         rows: [...rs].sort((a, b) => a.barangay_name.localeCompare(b.barangay_name)),
       }
     })
     .sort((a, b) => b.totalUnits - a.totalUnits)
 }
 
-// destination_id -> quantity, para sa isang gamot
+// destination_id -> quantity SA PIECES, para sa isang gamot
 type ManualQtyMap = Record<string, number>
 // medicine_name -> ManualQtyMap
 type ManualPlan = Record<string, ManualQtyMap>
@@ -90,7 +188,19 @@ export default function BarangayDistributionCard() {
   const [lastComputed, setLastComputed] = useState<Date | null>(null)
   const [refreshing, setRefreshing] = useState(false)
 
-  const [bufferMode, setBufferMode] = useState<BufferMode>('exact')
+  // >>> FIX: dating naka-default sa 'exact', pero ang Demand Forecast
+  // card (PredictionCard.tsx) ay LAGING nagpapakita ng BUFFERED na
+  // numero sa Reserve tab niya (walang toggle doon -- naka-fix sa
+  // reserve_for_pharmacy_buffered_15pct / available_for_96_barangays_
+  // buffered). Kapag 'exact' ang default dito, magkaibang baseline
+  // "available stock" ang ginagamit ng dalawang card kaya HINDI
+  // magtutugma ang "Matitira" (Demand Forecast) at ang recommendation
+  // (Barangay Distribution) -- ito yung na-obserbahan sa Facemask.
+  // Ngayon, 'buffered' ang default dito para laging magkatugma sila
+  // sa unang tingin. Pwede pa ring i-switch ng user papuntang 'Exact'
+  // kung gusto niya -- alamin lang niya na iiba ito sa laging-buffered
+  // na Demand Forecast Reserve tab. <<<
+  const [bufferMode, setBufferMode] = useState<BufferMode>('buffered')
   const [planMode, setPlanMode] = useState<PlanMode>('auto')
   const [activeMed, setActiveMed] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -98,6 +208,10 @@ export default function BarangayDistributionCard() {
   // ---- Manual mode state ----
   const [manualPlan, setManualPlan] = useState<ManualPlan>({})
   const [fillAllValue, setFillAllValue] = useState('')
+  // >>> BAGO: anong unit ang ipinapakita/tina-type sa Manual mode ngayon.
+  // Global lang ito (hindi per-medicine) para simple -- kapag lumipat ka
+  // ng gamot na walang box/strip packaging, awtomatikong babalik sa 'pcs'. <<<
+  const [inputUnit, setInputUnit] = useState<InputUnit>('pcs')
 
   // ---- Save state ----
   const [saving, setSaving] = useState(false)
@@ -154,8 +268,6 @@ export default function BarangayDistributionCard() {
 
   const autoGroups = useMemo(() => groupByMedicine(autoRows), [autoRows])
 
-  // Natitirang stock na HINDI ibinigay sa kahit kaninong barangay (strict
-  // equal split -- tingnan ang barangay_distribution.py), per medicine.
   const leftoverByMed = useMemo(() => {
     const rows = bufferMode === 'exact'
       ? data?.barangay_equal_distribution_exact || []
@@ -183,8 +295,6 @@ export default function BarangayDistributionCard() {
 
   const totalBarangays = data?.number_of_barangays || barangayList.length || 96
 
-  // Totoong unit ng bawat gamot (Piece/Bottle/Box/Loose/Strip/atbp.),
-  // galing sa stock summary o sa recommendation rows -- alinman ang meron.
   const unitByMed = useMemo(() => {
     const map = new Map<string, string>()
     for (const r of data?.stock_and_reserve_summary || []) map.set(r.medicine_name, r.unit || 'unit')
@@ -193,14 +303,15 @@ export default function BarangayDistributionCard() {
   }, [data, autoGroups])
   const unitFor = (medName: string) => unitByMed.get(medName) || 'unit'
 
-  // Totoong KABUUANG stock sa warehouse (mula sa medicine_batches, hindi
-  // katulad ng "leftover" mula sa equal-split) -- para maipakita bilang
-  // context sa tabi ng leftover figure, hindi na kailangang lumipat pa sa
-  // Demand Forecast card para makita.
-  const totalStockByMed = useMemo(() => {
-    const map = new Map<string, number>()
+  // >>> BAGO: packaging conversion (pieces_per_box/pieces_per_strip) per
+  // gamot, para ma-convert ng Manual mode input papuntang totoong pieces.
+  const packagingByMed = useMemo(() => {
+    const map = new Map<string, { piecesPerBox: number | null; piecesPerStrip: number | null }>()
     for (const r of data?.stock_and_reserve_summary || []) {
-      if (typeof r.current_stock_sa_warehouse === 'number') map.set(r.medicine_name, r.current_stock_sa_warehouse)
+      map.set(r.medicine_name, {
+        piecesPerBox: r.pieces_per_box ?? null,
+        piecesPerStrip: r.pieces_per_strip ?? null,
+      })
     }
     return map
   }, [data])
@@ -219,10 +330,27 @@ export default function BarangayDistributionCard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [planMode, autoGroups, allMedicineNames])
 
-  const activeGroup = groups?.find(g => g.medicine_name === activeMed) || null
+  // >>> BAGO: kapag lumipat ng gamot at wala palang box/strip packaging
+  // ang bagong active na gamot, i-reset pabalik sa 'pcs' -- iwas
+  // multiply-by-null/0 na bug.
+  useEffect(() => {
+    if (!activeMed) return
+    const pkg = packagingByMed.get(activeMed)
+    if (inputUnit === 'box' && !pkg?.piecesPerBox) setInputUnit('pcs')
+    if (inputUnit === 'strip' && !pkg?.piecesPerStrip) setInputUnit('pcs')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMed])
 
-  // Barangay-name search box sa step 2 (auto: filters the recommendation
-  // rows for the active medicine; manual: filters the full barangay list).
+  const activeGroup = groups?.find(g => g.medicine_name === activeMed) || null
+  const activePkg = activeMed ? packagingByMed.get(activeMed) : undefined
+
+  // Conversion factor papunta sa PIECES, base sa kasalukuyang inputUnit.
+  const activeMultiplier = useMemo(() => {
+    if (inputUnit === 'box') return activePkg?.piecesPerBox || 0
+    if (inputUnit === 'strip') return activePkg?.piecesPerStrip || 0
+    return 1
+  }, [inputUnit, activePkg])
+
   const filteredAutoRows = useMemo(() => {
     const rows = activeGroup?.rows || []
     const q = query.trim().toLowerCase()
@@ -234,19 +362,25 @@ export default function BarangayDistributionCard() {
     return q ? barangayList.filter(b => b.barangay_name.toLowerCase().includes(q)) : barangayList
   }, [barangayList, query])
 
-  const setManualQty = (medName: string, destId: string, qty: number) => {
+  // `qty` dito ay NASA KASALUKUYANG inputUnit (box/strip/pcs) -- iko-convert
+  // papuntang pieces bago i-store sa manualPlan.
+  const setManualQty = (medName: string, destId: string, qtyInCurrentUnit: number) => {
+    const multiplier = activeMultiplier || 1
+    const qtyInPieces = qtyInCurrentUnit * multiplier
     setManualPlan(prev => ({
       ...prev,
-      [medName]: { ...(prev[medName] || {}), [destId]: qty },
+      [medName]: { ...(prev[medName] || {}), [destId]: qtyInPieces },
     }))
   }
 
   const fillAllForActiveMed = () => {
     const val = parseInt(fillAllValue, 10)
     if (!activeMed || isNaN(val) || val < 0) return
+    const multiplier = activeMultiplier || 1
+    const qtyInPieces = val * multiplier
     setManualPlan(prev => {
       const next: ManualQtyMap = { ...(prev[activeMed] || {}) }
-      for (const b of barangayList) next[b.destination_id] = val
+      for (const b of barangayList) next[b.destination_id] = qtyInPieces
       return { ...prev, [activeMed]: next }
     })
   }
@@ -306,15 +440,6 @@ export default function BarangayDistributionCard() {
       const json = await res.json()
 
       if (!res.ok) {
-        // >>> FIX: dati, `json.detail` (ang TUNAY na error mula sa
-        // FastAPI backend, hal. Supabase constraint violation o
-        // mismatched medicine_id) ay tinatapon lang -- `json.error`
-        // (generic label na "Hindi na-save ang distribution plan.")
-        // lang ang ipinapakita sa card. Kaya kahit ano pang mangyari sa
-        // backend, parehong walang-detalyeng message lang ang lumalabas.
-        // Ngayon, isinasama na ang `detail` (string man o object) sa
-        // ipinapakitang error, para direktang makita ang totoong dahilan
-        // sa card mismo, hindi na kailangan pang buksan ang DevTools. <<<
         const detailText = typeof json.detail === 'string'
           ? json.detail
           : json.detail
@@ -325,10 +450,6 @@ export default function BarangayDistributionCard() {
           text: [json.error, detailText].filter(Boolean).join(' — ') || 'Hindi na-save ang distribution plan.',
         })
       } else {
-        // >>> FIX: "192 na barangay allocation" ay nakakalito -- akala
-        // mo lumagpas sa 96 barangay. Ang totoong ibig sabihin: 192 ROWS
-        // (bawat barangay ay may allocation PER MEDICINE -- 96 barangay
-        // x 2 gamot = 192 rows). I-breakdown na lang para malinaw. <<<
         const medCount = new Set(rows.map(r => r.medicine_name)).size
         const brgyCount = new Set(rows.map(r => r.destination_id)).size
         const rowsSaved = json.barangay_rows_saved ?? rows.length
@@ -405,14 +526,56 @@ export default function BarangayDistributionCard() {
           </button>
         </div>
 
-        {/* Exact / Buffer -- compact, isang linya lang, relevant lang sa AUTO */}
         {planMode === 'auto' && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>Reserve:</span>
             <div style={{ display: 'flex', gap: 4 }}>
               <button onClick={() => setBufferMode('exact')} style={miniTabStyle(bufferMode === 'exact')}>Exact</button>
               <button onClick={() => setBufferMode('buffered')} style={miniTabStyle(bufferMode === 'buffered')}>+15% Buffer</button>
             </div>
+            {/* >>> BAGO: paalala kung bakit maaaring magkaiba ang numero
+                dito laban sa Demand Forecast card, kapag "Exact" ang
+                pinili -- para hindi na muling isipin na "mali" ito. <<< */}
+            {bufferMode === 'exact' && (
+              <span style={{ fontSize: 9, color: 'var(--text3)', fontStyle: 'italic' }}>
+                (iba ito sa Demand Forecast — laging buffered ang doon)
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* >>> BAGO: Box/Strip/Pcs unit toggle, MANUAL mode lang. Naka-
+            disable ang Box/Strip kung ang kasalukuyang active na gamot ay
+            walang packaging conversion (walang pieces_per_box/strip). <<< */}
+        {planMode === 'manual' && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>I-input bilang:</span>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button
+                onClick={() => setInputUnit('box')}
+                disabled={!activePkg?.piecesPerBox}
+                title={!activePkg?.piecesPerBox ? 'Walang box packaging info ang gamot na ito' : undefined}
+                style={miniTabStyle(inputUnit === 'box', !activePkg?.piecesPerBox)}
+              >
+                Box
+              </button>
+              <button
+                onClick={() => setInputUnit('strip')}
+                disabled={!activePkg?.piecesPerStrip}
+                title={!activePkg?.piecesPerStrip ? 'Walang strip packaging info ang gamot na ito' : undefined}
+                style={miniTabStyle(inputUnit === 'strip', !activePkg?.piecesPerStrip)}
+              >
+                Strip
+              </button>
+              <button onClick={() => setInputUnit('pcs')} style={miniTabStyle(inputUnit === 'pcs')}>
+                Pcs
+              </button>
+            </div>
+            {inputUnit !== 'pcs' && activeMultiplier > 0 && (
+              <span style={{ fontSize: 9.5, color: 'var(--text3)' }}>
+                (1 {inputUnit} = {activeMultiplier} pcs)
+              </span>
+            )}
           </div>
         )}
 
@@ -461,35 +624,29 @@ export default function BarangayDistributionCard() {
                       </div>
 
                       {planMode === 'auto' ? (
-                        <div style={{ fontSize: 9.5, color: 'var(--text3)', marginTop: 2 }}>
+                        <div style={{ fontSize: 11, color: '#16a34a', fontWeight: 700, marginTop: 2 }}>
+                          {/* >>> BAGO: pinasimple base sa hiling -- pangalan
+                              ng gamot na lang (nasa itaas) + total na
+                              AVAILABLE STOCK PARA SA BARANGAY DISTRIBUTION
+                              (kasama ang leftover, hindi lang ang
+                              per-barangay na bahagi), naka-Box/Strip/Pcs
+                              format. Tinanggal ang "× 96 brgy", leftover
+                              note, at "Kabuuang stock" na hiwalay -- lahat
+                              na iyon ay puwede pa ring makita sa kanang
+                              panel (per-barangay recommendation list). <<< */}
                           {autoG ? (
-                            <>
-                              {autoG.perBarangayBase} {autoG.unit} × {autoG.barangayCount} brgy
-                              {/* Strict equal split -- lahat pareho ang tanggap, walang
-                                  +1 kahit kanino. Ang leftover mula sa floor division ay
-                                  hindi ibinigay -- nananatili sa warehouse.
-
-                                  >>> FIX: dating "(11 pcs natitira sa warehouse)" ay
-                                  nagpapamukhang para bang 11 na lang ang TOTAL na stock --
-                                  malinaw na ito ay LEFTOVER lang mula sa hating-pantay,
-                                  hindi ang buong stock. Idinagdag ang totoong total stock
-                                  bilang context, at binago ang salita mula "natitira sa
-                                  warehouse" (malabo) papuntang "leftover, hindi kasali sa
-                                  split" (mas malinaw). <<< */}
-                              {(leftoverByMed.get(medName) || 0) > 0 && (
-                                <span> (+{leftoverByMed.get(medName)} {autoG.unit} leftover, hindi kasali sa split)</span>
-                              )}
-                              {totalStockByMed.has(medName) && (
-                                <div>Kabuuang stock: {totalStockByMed.get(medName)} {autoG.unit}</div>
-                              )}
-                            </>
+                            formatTotalAvailableBreakdown(
+                              autoG.totalUnits + (leftoverByMed.get(medName) || 0),
+                              packagingByMed.get(medName)?.piecesPerBox,
+                              packagingByMed.get(medName)?.piecesPerStrip
+                            )
                           ) : 'Walang matitira'}
                         </div>
                       ) : (
                         <>
                           <div style={{ fontSize: 9.5, color: 'var(--text3)', marginTop: 2, display: 'flex', justifyContent: 'space-between' }}>
                             <span>{mStats!.filled}/{totalBarangays} brgy</span>
-                            {mStats!.total > 0 && <span style={{ color: '#16a34a', fontWeight: 700 }}>{mStats!.total} {unitFor(medName)}</span>}
+                            {mStats!.total > 0 && <span style={{ color: '#16a34a', fontWeight: 700 }}>{mStats!.total} pcs</span>}
                           </div>
                           <div style={{ height: 3, borderRadius: 999, background: 'var(--border)', marginTop: 4, overflow: 'hidden' }}>
                             <div style={{ height: '100%', width: `${progressPct}%`, background: '#16a34a', borderRadius: 999, transition: 'width .15s ease' }} />
@@ -527,8 +684,8 @@ export default function BarangayDistributionCard() {
                         <input
                           value={fillAllValue}
                           onChange={e => setFillAllValue(e.target.value.replace(/[^0-9]/g, ''))}
-                          placeholder="Qty"
-                          style={{ ...inputStyle, width: 48, textAlign: 'center' }}
+                          placeholder={inputUnit === 'pcs' ? 'Qty' : `Qty (${inputUnit})`}
+                          style={{ ...inputStyle, width: 64, textAlign: 'center' }}
                         />
                         <button onClick={fillAllForActiveMed} style={fillAllButtonStyle} title="Ilagay ang quantity na ito sa LAHAT ng barangay">
                           Fill All
@@ -543,13 +700,18 @@ export default function BarangayDistributionCard() {
                   <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 3, marginTop: 6 }}>
                     {planMode === 'auto' ? (
                       filteredAutoRows.length === 0 ? (
-                        <div style={rowEmptyStyle}>Walang nahanap na barangay.</div>
+                        <div style={rowEmptyStyle}>Walang barangay na matitira para sa gamot na ito.</div>
                       ) : (
                         filteredAutoRows.map(r => (
                           <div key={r.destination_id} style={rowStyle}>
                             <span style={rowLabelStyle}>{r.barangay_name}</span>
-                            <span style={{ fontWeight: 700, color: '#16a34a', flexShrink: 0, marginLeft: 6, fontVariantNumeric: 'tabular-nums' }}>
-                              {r.recommended_quantity} {r.unit}
+                            <span style={{ fontWeight: 700, color: '#16a34a', flexShrink: 0, marginLeft: 6, fontVariantNumeric: 'tabular-nums', textAlign: 'right' }}>
+                              {formatPackagingBreakdown(
+                                r.recommended_boxes,
+                                r.recommended_strips,
+                                r.recommended_pieces,
+                                r.recommended_quantity
+                              )}
                             </span>
                           </div>
                         ))
@@ -558,8 +720,17 @@ export default function BarangayDistributionCard() {
                       <div style={rowEmptyStyle}>Walang nahanap na barangay.</div>
                     ) : (
                       filteredBarangayList.map(b => {
-                        const val = manualPlan[activeMed]?.[b.destination_id] ?? 0
-                        const hasVal = val > 0
+                        const storedPieces = manualPlan[activeMed]?.[b.destination_id] ?? 0
+                        const multiplier = activeMultiplier || 1
+                        // >>> BAGO: ang laman ng input ay laging naka-store
+                        // sa PIECES sa likod (manualPlan) -- dito lang ito
+                        // na-convert papunta sa kasalukuyang inputUnit para
+                        // ipakita. Kung may natitirang piraso na hindi
+                        // eksaktong mahati (hal. lumipat ng unit habang may
+                        // laman na), ipinapakita ang buong "= X pcs" sa
+                        // tabi para malinaw pa rin ang totoong halaga. <<<
+                        const displayValue = multiplier > 0 ? storedPieces / multiplier : storedPieces
+                        const hasVal = storedPieces > 0
                         return (
                           <div
                             key={b.destination_id}
@@ -572,10 +743,13 @@ export default function BarangayDistributionCard() {
                               </span>
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 6 }}>
+                              {inputUnit !== 'pcs' && hasVal && !Number.isInteger(displayValue) && (
+                                <span style={{ fontSize: 8.5, color: 'var(--text3)' }}>({storedPieces} pcs)</span>
+                              )}
                               <input
                                 type="number"
                                 min={0}
-                                value={val || ''}
+                                value={displayValue || ''}
                                 onChange={e => setManualQty(activeMed, b.destination_id, Math.max(0, parseInt(e.target.value, 10) || 0))}
                                 placeholder="0"
                                 style={{
@@ -585,7 +759,7 @@ export default function BarangayDistributionCard() {
                                   fontWeight: hasVal ? 700 : 400,
                                 }}
                               />
-                              <span style={{ fontSize: 9.5, color: 'var(--text3)' }}>{unitFor(activeMed)}</span>
+                              <span style={{ fontSize: 9.5, color: 'var(--text3)' }}>{inputUnit}</span>
                             </div>
                           </div>
                         )
@@ -660,7 +834,7 @@ function modeButtonStyle(active: boolean): React.CSSProperties {
   }
 }
 
-function miniTabStyle(active: boolean): React.CSSProperties {
+function miniTabStyle(active: boolean, disabled?: boolean): React.CSSProperties {
   return {
     fontSize: 10,
     fontWeight: 700,
@@ -668,8 +842,9 @@ function miniTabStyle(active: boolean): React.CSSProperties {
     padding: '3px 8px',
     border: '1px solid ' + (active ? '#16a34a' : 'var(--border)'),
     background: active ? '#dcfce7' : 'transparent',
-    color: active ? '#16a34a' : 'var(--text3)',
-    cursor: 'pointer',
+    color: disabled ? 'var(--border)' : active ? '#16a34a' : 'var(--text3)',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.5 : 1,
   }
 }
 

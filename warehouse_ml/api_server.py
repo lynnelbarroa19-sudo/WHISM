@@ -1,5 +1,5 @@
 """
-api_server.py  (v5 - PHARMACY REQUEST PREDICTION + PER-BARANGAY RECOMMENDATION)
+api_server.py  (v5.4 - + removed auto-logging from /predict-distribution)
 --------------------------------------------------------------------------
 Ito ang ML mula sa PANIG NG WAREHOUSE. Ang sagot dito:
 
@@ -14,23 +14,72 @@ Ito ang ML mula sa PANIG NG WAREHOUSE. Ang sagot dito:
   3. "Ang MATITIRA pagkatapos ng reserve -- ilan ang pwede kong ipamigay
      sa 96 BARANGAY, PANTAY-PANTAY bawat isa?"
 
-     >>> BAGO (v5): Hindi lang bilang/aggregate ang sagot dito ngayon --
-     may TUNAY NA LISTAHAN na kung sino eksaktong tatanggap at ilan
-     (per-barangay recommendation), kasama na ang PATAS na paghahati
-     ng leftover mula sa floor division (walang masasayang na unit). <<<
+CHANGES IN v5.4 (tinanggal ang auto-logging sa /predict-distribution):
+  Dating gumagawa ang predict_distribution() ng BAGONG "draft" na
+  demand_forecasts row + "pending" na barangay_distributions row PARA
+  SA BAWAT GAMOT, TUWING may nag-load o nag-refresh ng dashboard --
+  kahit walang totoong "Confirm & Save" na pinindot ng staff. Dahil
+  ang /predict-distribution ay tinatawag paulit-ulit (bawat page view,
+  bawat auto-refresh), mabilis na dumadami nang walang kwenta ang
+  dalawang table na 'yan.
+
+  Ang TAMANG "save" flow ay nasa /confirm-distribution endpoint na
+  (save_confirmed_distribution() sa barangay_distribution.py) -- doon
+  lang dapat talaga sumusulat sa demand_forecasts/barangay_
+  distributions, kapag EXPLICIT na pinindot ng staff ang "Confirm &
+  Save" button. Kaya TINANGGAL na ang awtomatikong pag-log sa
+  predict_distribution() -- hindi ito ginagamit ng frontend (preview/
+  read-only lang dapat ang endpoint na 'to), at duplicate lang sa
+  tamang confirm flow.
+
+  (Ang log_predictions_to_supabase() function mismo ay INIWAN pa rin
+  sa baba ng file, hindi tinanggal -- basta hindi na ito AWTOMATIKONG
+  tinatawag. Kung sakaling kailangan pa ito balang araw para sa ibang
+  layunin, hal. periodic snapshot logging para sa MAE tracking,
+  puwede pa rin itong gamitin nang explicit.)
+
+CHANGES IN v5.3 (HTTP/1.1-only Supabase client -- WinError 10035 fix):
+  Dating nagkakaroon ng "httpcore.ReadError: [WinError 10035] A non-blocking
+  socket operation could not be completed immediately" tuwing dalawa o
+  higit pang dashboard card (hal. Demand Forecast + Barangay Distribution)
+  ang sabay-sabay tumatawag sa /predict-distribution. Dahil `def` (hindi
+  `async def`) ang endpoint, pinapatakbo ito ni FastAPI sa isang
+  THREADPOOL -- kaya dalawang magkaibang thread ang sabay-sabay gumagamit
+  ng IISANG cached na `_supabase` client. Ang HTTP/2 (default sa httpx/
+  postgrest-py) ay may kilalang Windows-specific bug: nasisira ang
+  non-blocking socket read state kapag naka-interleave ang dalawang
+  thread sa parehong multiplexed stream. Ang fix: pilitin na HTTP/1.1
+  LANG (http2=False) sa custom httpx.Client na ipinapasa sa Supabase
+  ClientOptions -- tingnan ang get_supabase() sa ibaba.
+
+CHANGES IN v5.2 (Box/Strip/Piece breakdown):
+  Idinagdag ang `fetch_medicine_packaging()` -- kinukuha ang
+  `pieces_per_box` at `pieces_per_strip` PER GAMOT mula sa medicine_batches,
+  para ma-convert ng frontend ang "Matitira" (available_for_96_barangays)
+  figure papunta sa Box/Strip/Piece breakdown.
+
+>>> DEBUG HANDLER (pansamantala): idinagdag ang isang global exception
+handler sa ibaba na kukuha ng BUONG Python traceback at ipapasa ito
+bilang JSON `detail` field, sa halip na basta "Internal Server Error"
+lang. Makikita mo na ngayon ang eksaktong error DIREKTA sa dashboard
+card mismo (walang kailangang balik-balikan pa ang terminal). TANGGALIN
+ITO pagkatapos ma-fix ang bug -- hindi dapat naka-expose ang raw
+traceback sa production, delikado ito security-wise. <<<
 
 Run: python -m uvicorn api_server:app --reload --port 8000
 Docs: http://127.0.0.1:8000/docs
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict, Optional, List
 import pandas as pd
 import joblib
 import os
 import time
+import traceback
 from dotenv import load_dotenv
 from supabase import create_client
 
@@ -49,7 +98,27 @@ from barangay_distribution import (
 
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-app = FastAPI(title="WHIMS RHU - Warehouse ML Service v5 (Pharmacy Request Prediction + Barangay Recommendation)")
+app = FastAPI(title="WHIMS RHU - Warehouse ML Service v5.4 (no auto-logging on predict, DEBUG mode)")
+
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+)
+
+
+# >>> DEBUG: pansamantalang global exception handler. Kapag may ANUMANG
+# hindi na-catch na exception sa loob ng kahit anong endpoint, ito ang
+# huhuli, at ibabalik bilang JSON (kasama ang BUONG traceback sa
+# "detail" field) sa halip na plain-text "Internal Server Error" na
+# walang detalye. Makikita mo agad ito sa red error card ng dashboard.
+@app.exception_handler(Exception)
+async def debug_exception_handler(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    print(tb)  # naka-print pa rin sa terminal, extra visibility
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal Server Error", "detail": tb},
+    )
+
 
 # ============================================================
 # SUPABASE CONNECTION (optional -- para awtomatikong makuha ang
@@ -63,12 +132,53 @@ def get_supabase():
         key = os.environ.get("SUPABASE_KEY")
         if not url or not key:
             return None
-        _supabase = create_client(url, key)
+
+        from supabase import ClientOptions
+
+        options = ClientOptions(
+            postgrest_client_timeout=30,
+            storage_client_timeout=30,
+        )
+        _supabase = create_client(url, key, options=options)
+
+        # >>> FIX v5.3 (WinError 10035): dating default client -- may
+        # HTTP/2 enabled by default. Kapag dalawa o higit pang FastAPI
+        # request ang tumatakbo nang SABAY (bawat isa nasa sariling
+        # threadpool worker thread dahil sync `def` ang mga endpoint
+        # dito -- tingnan ang predict_distribution()), pareho silang
+        # gumagamit ng IISANG cached na `_supabase` client/connection.
+        # Ang HTTP/2 multiplexing sa httpcore ay may kilalang
+        # Windows-specific bug: nasisira ang non-blocking socket read
+        # state kapag naka-interleave ang dalawang thread sa parehong
+        # stream, kaya lumalabas ang "httpcore.ReadError:
+        # [WinError 10035] A non-blocking socket operation could not
+        # be completed immediately".
+        #
+        # PAALALA: sa supabase==2.10.0 / postgrest==0.18.0 (na-verify
+        # sa source), WALANG "httpx_client" param ang ClientOptions --
+        # at NAKA-HARDCODE ang http2=True sa loob mismo ng
+        # SyncPostgrestClient.create_session(), kaya wala talagang
+        # paraan na i-configure ito PASOK sa ClientOptions para sa
+        # bersyong ito. Kaya sa halip, DIREKTA na lang nating
+        # pinapalitan ang underlying httpx.Client (`.postgrest.session`)
+        # PAGKATAPOS itong magawa ni create_client() -- ginagaya ang
+        # parehong base_url/headers/timeout ng luma, http2=False lang
+        # ang pinagkaiba. Ito ang gumagawa ng normal na HTTP/1.1
+        # connection pooling (hiwalay na socket bawat concurrent
+        # request sa halip na i-multiplex sa isang shared stream),
+        # kaya ligtas na ito sa multi-thread na concurrent access. <<<
+        import httpx
+        old_session = _supabase.postgrest.session
+        _supabase.postgrest.session = httpx.Client(
+            base_url=old_session.base_url,
+            headers=old_session.headers,
+            timeout=old_session.timeout,
+            follow_redirects=True,
+            http2=False,
+        )
+        old_session.close()
     return _supabase
 
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
-)
 
 def load_models():
     models_dir = os.path.join(BASE_DIR, "models")
@@ -81,6 +191,14 @@ def load_models():
     }
 
 _cache = None
+# >>> BAGO: cache PARA LANG SA SEASONAL computation -- isang beses lang
+# ito ini-compute BAWAT ARAW (hindi bawat page load/refresh), dahil
+# hindi naman nagbabago ang "seasonal pattern" sa loob ng iisang araw.
+# Malaking bawas 'to sa dami ng katawagan sa mabigat na 200-araw na
+# forecast (SEASONAL_HORIZON_DAYS) -- ang mga ibang page load sa
+# parehong araw ay gagamit na lang ng cached na resulta. <<<
+_seasonal_cache = {"date": None, "demand_by_season": None}
+
 def get_models():
     global _cache
     if _cache is None:
@@ -158,15 +276,71 @@ def fetch_medicine_catalog() -> Dict[str, Dict[str, str]]:
     return catalog
 
 
+def fetch_medicine_packaging() -> Dict[str, Dict[str, Optional[int]]]:
+    """
+    Kunin ang packaging conversion PER GAMOT, mula sa medicine_batches, para
+    magamit ng frontend na i-convert ang "available for barangays" papunta
+    sa Box/Strip/Piece breakdown.
+
+    >>> FIX: walang column na "pieces_per_box" sa medicine_batches (na-
+    verify via information_schema.columns -- error 42703 dati). Dalawang
+    hakbang pala ang totoong packaging structure: BOX -> STRIPS_PER_BOX ->
+    PIECES_PER_STRIP (kaya ang total_quantity generated column ay malamang
+    boxes * strips_per_box * pieces_per_strip + loose_pieces). Kaya
+    dini-derive na lang natin ang "pieces_per_box" = strips_per_box *
+    pieces_per_strip, sa halip na kunin ito nang direkta bilang column. <<<
+
+    PAALALA: ang conversion factor ay naka-store PER BATCH sa DB --
+    kinukuha lang dito ang values mula sa batch na may PINAKAMALAKING
+    total_quantity bilang "representative" packaging ng gamot na iyon.
+    """
+    sb = get_supabase()
+    if sb is None:
+        return {}
+
+    resp = (
+        sb.table("medicine_batches")
+        .select("total_quantity, strips_per_box, pieces_per_strip, status, medicines(generic_name)")
+        .in_("status", ["available", "low_stock"])
+        .execute()
+    )
+    if not resp.data:
+        return {}
+
+    best_by_med: Dict[str, dict] = {}
+    for row in resp.data:
+        med = row.get("medicines")
+        name = med.get("generic_name") if isinstance(med, dict) else None
+        if not name:
+            continue
+        qty = row.get("total_quantity") or 0
+        existing = best_by_med.get(name)
+        if existing is None or qty > existing["_qty"]:
+            strips_per_box = row.get("strips_per_box")
+            pieces_per_strip = row.get("pieces_per_strip")
+            # Derived, hindi direktang column
+            pieces_per_box = (
+                strips_per_box * pieces_per_strip
+                if strips_per_box and pieces_per_strip
+                else None
+            )
+            best_by_med[name] = {
+                "_qty": qty,
+                "pieces_per_box": pieces_per_box,
+                "pieces_per_strip": pieces_per_strip,
+            }
+
+    return {
+        name: {"pieces_per_box": v["pieces_per_box"], "pieces_per_strip": v["pieces_per_strip"]}
+        for name, v in best_by_med.items()
+    }
+
+
 def fetch_pending_committed_requests() -> Dict[str, int]:
     """
     Kunin ang mga request na 'pending', 'confirm', o 'alerted' pa lang
     (ibig sabihin, TIYAK na babawasin sa warehouse balang araw, pero
     HINDI PA nababawas ngayon dahil hindi pa na-'received').
-
-    Ito ay TIYAK na commitment, HINDI prediction -- kaya isasama natin
-    ito nang buo (walang buffer/discount) sa reserve computation,
-    bukod pa sa ML-predicted future demand.
     """
     sb = get_supabase()
     if sb is None:
@@ -182,7 +356,6 @@ def fetch_pending_committed_requests() -> Dict[str, int]:
         return {}
 
     df = pd.DataFrame(resp.data)
-    # Natitirang dami na hindi pa na-fulfill (kung may partial fulfillment na)
     df["remaining_qty"] = df["requested_qty"] - df["fulfilled_qty"].fillna(0)
     df["remaining_qty"] = df["remaining_qty"].clip(lower=0)
 
@@ -192,32 +365,14 @@ def fetch_pending_committed_requests() -> Dict[str, int]:
 def fetch_current_stock_from_supabase() -> Dict[str, int]:
     """
     Kunin ang current_stock mula sa Supabase, gamit ang TOTOONG schema:
-
       medicine_batches (boxes, total_quantity [computed], status, expiration_date)
-            |
             | medicine_id (foreign key)
-            v
       medicines (generic_name, category, ...)
-
-    Ang "current stock" ay ang KABUUAN ng total_quantity sa lahat ng
-    batch na 'available' O 'low_stock' pa (ibig sabihin may laman
-    pa rin, hindi 'out_of_stock'/'expired'/'archived'), at hindi pa
-    expired.
-
-    PAALALA: ang pagtutugma ng pangalan papunta sa pharmacy_requests.
-    medicine_name ay TEXT MATCHING lang -- kailangang magkatugma nang
-    eksakto ang spelling sa dalawang table. Kung minsan magkaiba
-    (hal. "Paracetamol" sa isa, "Paracetamol 500mg" sa isa), hindi
-    magmamatch ang reserve computation sa demand prediction.
     """
     sb = get_supabase()
     if sb is None:
         raise HTTPException(500, "Walang SUPABASE_URL/SUPABASE_KEY na naka-set sa .env file.")
 
-    # I-fetch ang mga batch na MAY LAMAN pa ('available' o 'low_stock'),
-    # kasama ang generic_name mula sa naka-link na medicines table
-    # (PostgREST embedding via foreign key). Hindi kasama ang
-    # 'out_of_stock', 'expired', 'archived'.
     resp = (
         sb.table("medicine_batches")
         .select("total_quantity, status, expiration_date, medicines(generic_name)")
@@ -228,12 +383,9 @@ def fetch_current_stock_from_supabase() -> Dict[str, int]:
         raise HTTPException(400, "Walang 'available' o 'low_stock' na batch sa medicine_batches table.")
 
     df = pd.DataFrame(resp.data)
-    # I-flatten ang naka-nest na 'medicines' object papunta sa generic_name column
     df["generic_name"] = df["medicines"].apply(lambda m: m.get("generic_name") if isinstance(m, dict) else None)
     df = df.dropna(subset=["generic_name"])
 
-    # I-exclude ang mga expired na batch kahit pa 'available' pa ang status
-    # (safety check, sakaling hindi pa na-update ang status automatically)
     today = pd.Timestamp.today().normalize()
     if "expiration_date" in df.columns:
         exp = pd.to_datetime(df["expiration_date"], errors="coerce")
@@ -243,11 +395,28 @@ def fetch_current_stock_from_supabase() -> Dict[str, int]:
     return stock_series.astype(int).to_dict()
 
 
-# ============================================================
-# I-predict ang: (a) KAILAN ang susunod na 1-3 request cycles ng
-# pharmacy sa loob ng forecast window, at (b) ILAN bawat cycle
-# ============================================================
 def build_pharmacy_request_forecast(forecast_days_ahead: int):
+    """
+    >>> FIX (BAGAL sa mahabang forecast_days_ahead, hal. 400+ araw para
+    sa Seasonal tab): DATING isa-isang `qty_model.predict()` call PER
+    EVENT (bawat gamot, bawat susunod na petsa) -- kaya sa 400-araw na
+    horizon, umaabot ng DAAN-DAANG indibidwal na model.predict() calls,
+    bawat isa may sariling overhead (paggawa ng bagong 1-row DataFrame,
+    atbp.), kaya sobrang bagal, lalo na dahil TAWAG ITO NANG DALAWANG
+    BESES bawat /predict-distribution (30-araw para sa Demand, +400-araw
+    para sa Seasonal), at TINATAWAG ang endpoint ng DALAWANG card
+    (Demand Forecast + Barangay Distribution) sa bawat page load.
+
+    NGAYON: BATCHED na ang prediction PER "STEP" (hindi na per event)
+    -- lahat ng gamot na may susunod na petsa sa PAREHONG hakbang ay
+    pinagsasama sa IISANG DataFrame, IISANG model.predict() call na
+    lang. Bilang ng calls = bilang ng "steps" hanggang maubos ang
+    horizon ng gamot na may PINAKAMAIKLING interval (hindi na
+    bilang-ng-gamot x steps-bawat-gamot) -- malaking bawas sa dami ng
+    calls, lalo na kapag maraming gamot. Eksaktong PAREHONG resulta
+    ang output (parehong recursive na rolling_avg update per medicine),
+    mas mabilis lang.
+    """
     models = get_models()
     qty_model = models["qty_model"]
     le_med = models["le_med"]
@@ -258,98 +427,98 @@ def build_pharmacy_request_forecast(forecast_days_ahead: int):
     known_med = set(le_med.classes_)
     lf = latest_features[latest_features["medicine_name"].isin(known_med)].reset_index(drop=True)
 
-    events = []  # bawat predicted na susunod na REQUEST EVENT (may petsa + bilang)
+    if lf.empty:
+        return pd.DataFrame()
 
-    for _, r in lf.iterrows():
-        med = r["medicine_name"]
-        interval = max(3, int(r["days_since_last_request"]))  # gaano kadalas humingi ang pharmacy dito
-        med_enc = le_med.transform([med])[0]
+    horizon_end = today + pd.Timedelta(days=forecast_days_ahead)
 
-        # I-predict ang bawat SUSUNOD na request cycle sa loob ng forecast window
-        next_date = today + pd.Timedelta(days=interval)
-        rolling_avg = r["rolling_avg_recent"]
-        same_month_ly = r["same_month_last_year"]
+    med_names = lf["medicine_name"].tolist()
+    med_categories = lf["medicine_category"].tolist()
+    intervals = [max(3, int(x)) for x in lf["days_since_last_request"]]
+    med_encs = le_med.transform(med_names)
+    rolling_avgs = lf["rolling_avg_recent"].tolist()
+    same_month_lys = lf["same_month_last_year"].tolist()
+    next_dates = [today + pd.Timedelta(days=iv) for iv in intervals]
+    active = [d <= horizon_end for d in next_dates]
 
-        while next_date <= today + pd.Timedelta(days=forecast_days_ahead):
-            season_enc = le_season.transform([get_season(next_date.month)])[0]
-            X_pred = pd.DataFrame([{
-                "day_of_week": next_date.dayofweek,
-                "day_of_month": next_date.day,
-                "week_of_year": int(next_date.isocalendar().week),
-                "month": next_date.month,
+    events = []
+
+    while any(active):
+        batch_idx = [i for i in range(len(med_names)) if active[i]]
+
+        rows = []
+        for i in batch_idx:
+            d = next_dates[i]
+            season_enc = le_season.transform([get_season(d.month)])[0]
+            rows.append({
+                "day_of_week": d.dayofweek,
+                "day_of_month": d.day,
+                "week_of_year": int(d.isocalendar().week),
+                "month": d.month,
                 "season_enc": season_enc,
-                "medicine_enc": med_enc,
-                "rolling_avg_recent": rolling_avg,
-                "same_month_last_year": same_month_ly,
-                "days_since_last_request": interval,
-            }])
-            predicted_qty = max(0, round(qty_model.predict(X_pred)[0]))
+                "medicine_enc": med_encs[i],
+                "rolling_avg_recent": rolling_avgs[i],
+                "same_month_last_year": same_month_lys[i],
+                "days_since_last_request": intervals[i],
+            })
 
+        # >>> ISANG batched predict() call PARA SA BUONG STEP na ito
+        # (lahat ng aktibong gamot sabay-sabay), sa halip na paisa-isa. <<<
+        preds = qty_model.predict(pd.DataFrame(rows))
+
+        for j, i in enumerate(batch_idx):
+            predicted_qty = max(0, round(preds[j]))
+            d = next_dates[i]
             events.append({
-                "predicted_request_date": next_date.strftime("%Y-%m-%d"),
-                "year": next_date.year,
-                "month": next_date.month,
-                "week_of_year": int(next_date.isocalendar().week),
-                "medicine_name": med,
-                "medicine_category": r["medicine_category"],
+                "predicted_request_date": d.strftime("%Y-%m-%d"),
+                "year": d.year,
+                "month": d.month,
+                "week_of_year": int(d.isocalendar().week),
+                "medicine_name": med_names[i],
+                "medicine_category": med_categories[i],
                 "predicted_quantity_requested": int(predicted_qty),
             })
 
-            # gamitin ang bagong prediction bilang updated rolling average
-            # para sa susunod na cycle sa loob ng forecast window
-            rolling_avg = (rolling_avg + predicted_qty) / 2
-            next_date = next_date + pd.Timedelta(days=interval)
+            rolling_avgs[i] = (rolling_avgs[i] + predicted_qty) / 2
+            next_dates[i] = d + pd.Timedelta(days=intervals[i])
+            active[i] = next_dates[i] <= horizon_end
 
     return pd.DataFrame(events)
 
 
 @app.post("/predict-distribution")
 def predict_distribution(req: PredictRequest):
-    # Kung walang current_stock na ipinasa sa request body, awtomatikong
-    # kukunin ito mula sa Supabase "warehouse_stock" table
     current_stock = req.current_stock or fetch_current_stock_from_supabase()
 
-    # >>> PLAIN ARITHMETIC (barangay_distribution.py): kunin ang BUONG
-    # listahan ng barangay (hindi lang bilang), para magamit sa
-    # per-barangay recommendation sa ibaba. WALANG ML dito. <<<
     barangay_list = fetch_barangay_list_from_destinations(get_supabase())
     num_brgy_final = req.number_of_barangays or len(barangay_list) or fetch_barangay_count_from_destinations()
 
-    # TIYAK na commitment (pending/confirm/alerted na requests, hindi pa
-    # na-receive) -- ito ay babawasin din sa warehouse balang araw
     pending_committed = fetch_pending_committed_requests()
 
-    # Totoong unit/category ng bawat gamot (Piece/Bottle/Box/Loose/Strip/
-    # atbp.) mula sa 'medicines' table -- ipapalit sa dating generic na "u",
-    # AT ginagamit din para bigyan ng unit/category ang mga bagong gamot na
-    # wala pang laman sa ML model (tingnan ang LIVE MERGE sa ibaba)
     medicine_catalog = fetch_medicine_catalog()
     unit_by_med = {name: info["unit"] for name, info in medicine_catalog.items()}
+
+    packaging_by_med = fetch_medicine_packaging()
 
     events_df = build_pharmacy_request_forecast(req.forecast_days_ahead)
 
     if events_df.empty:
         raise HTTPException(400, "Walang na-generate na forecast. I-check ang latest_features.csv.")
 
-    # ---------- A) LISTAHAN NG BAWAT PREDICTED REQUEST EVENT ----------
-    # (ito ang direktang sagot sa "kailan at ilan ang maaaring i-request")
     predicted_requests = events_df.sort_values("predicted_request_date").to_dict(orient="records")
 
-    # ---------- B) WEEKLY VIEW (aggregate) ----------
     weekly = (
         events_df.groupby(["year", "week_of_year", "medicine_name", "medicine_category"])
         ["predicted_quantity_requested"].sum().reset_index()
         .rename(columns={"predicted_quantity_requested": "predicted_qty_this_week"})
     )
 
-    # ---------- C) MONTHLY VIEW (aggregate) ----------
     monthly = (
         events_df.groupby(["year", "month", "medicine_name", "medicine_category"])
         ["predicted_quantity_requested"].sum().reset_index()
         .rename(columns={"predicted_quantity_requested": "predicted_qty_this_month"})
     )
 
-    # ---------- D) TOTAL PREDICTED DEMAND (buong forecast window) ----------
     total_demand = (
         events_df.groupby(["medicine_name", "medicine_category"])
         ["predicted_quantity_requested"].sum().reset_index()
@@ -362,21 +531,6 @@ def predict_distribution(req: PredictRequest):
     total_demand = total_demand.sort_values("total_predicted_pharmacy_request", ascending=False)
     total_demand["unit"] = total_demand["medicine_name"].map(unit_by_med).fillna("unit")
 
-    # ---------- D.1) LIVE DEMAND SUMMARY (para lang sa Demand tab) --------
-    # `total_demand` sa itaas ay PURONG ML prediction at hindi na ito
-    # babaguhin pa -- ginagamit pa rin ito nang walang pagbabago sa Reserve
-    # computation sa ibaba (Section E), para hindi ma-double count doon ang
-    # TIYAK na commitment (`pending_committed`, na hiwalay nang idinaragdag
-    # doon bilang `pending_qty`).
-    #
-    # Dito naman, gumagawa tayo ng HIWALAY na bersyon PARA LANG SA
-    # pharmacy_demand_summary (ang Demand tab sa UI) na naglalagay AGAD ng
-    # bawat totoong open request (status pending/confirm/alerted) -- bago
-    # man o dati nang gamot -- kahit hindi pa 'received'/na-retrain ang ML
-    # model dito. Kung mas malaki ang totoong open request kaysa sa
-    # ML-predicted na demand, ito ang gagamitin; kung bagong-bagong gamot
-    # na wala pang laman sa model, ang totoong open-request quantity na
-    # lang ang gagamitin bilang panandaliang demand figure.
     demand_by_med = {
         row["medicine_name"]: {
             "medicine_category": row["medicine_category"],
@@ -409,18 +563,11 @@ def predict_distribution(req: PredictRequest):
     demand_summary_live["unit"] = demand_summary_live["medicine_name"].map(unit_by_med).fillna("unit")
     demand_summary_live = demand_summary_live.sort_values("total_predicted_pharmacy_request", ascending=False)
 
-    # ---------- E) RESERVE PARA SA PHARMACY (EXACT + BUFFERED) ----------
-    # ---------- F) MATITIRA -> EQUAL SPLIT SA BAWAT BARANGAY ----------
     num_brgy = num_brgy_final
     result_per_medicine = []
     distribution_exact = []
     distribution_buffered = []
 
-    # Isama rin dito ang mga gamot na may TUNAY na open request
-    # (pending/confirm/alerted) pero WALA pang laman sa warehouse
-    # (stock = 0) -- hal. bagong-bagong request na hindi pa na-stock kailanman.
-    # Kung hindi ito isasama, hindi makikita sa Reserve tab ang isang malinaw
-    # na SHORTAGE case (0 stock, may totoong demand).
     meds_with_new_requests = {med for med, qty in pending_committed.items() if qty > 0}
     all_meds_for_reserve = sorted(set(current_stock) | meds_with_new_requests)
 
@@ -429,37 +576,19 @@ def predict_distribution(req: PredictRequest):
         pred_row = total_demand[total_demand["medicine_name"] == med]
         predicted_pharmacy_request = int(pred_row["total_predicted_pharmacy_request"].values[0]) if len(pred_row) else 0
 
-        # `stock` (from fetch_current_stock_from_supabase) is always a sum of
-        # medicine_batches.total_quantity, which is a PIECES count (boxes *
-        # pieces_per_box + loose_pieces -- see medicinestock/page.tsx). It is
-        # NOT denominated in `medicines.unit` (a free-text packaging label
-        # like "Box" chosen when the medicine was added). Labeling the stock
-        # figure with `unit` made e.g. "99 pieces" display as "99 Box",
-        # which doesn't match the real box count on the Inventory page --
-        # so the stock/reserve/available figures below use "pcs" instead.
         stock_unit = "pcs"
 
-        # (A) TIYAK na commitment -- pending/confirm/alerted na requests
-        #     na hindi pa na-receive, kaya hindi pa nababawas sa stock
         pending_qty = int(pending_committed.get(med, 0))
 
-        # (B) ML-predicted FUTURE demand sa loob ng forecast window
-        # RESERVE = TIYAK na commitment + PREDICTED future demand
         reserve_exact = pending_qty + predicted_pharmacy_request
         available_exact = max(0, stock - reserve_exact)
         if stock > 0:
             pct_available_exact = round((available_exact / stock * 100), 2)
             pct_reserved_exact = round((reserve_exact / stock * 100), 2)
         else:
-            # Walang stock (hal. bagong-bagong gamot na hindi pa na-stock
-            # kailanman) -- 100% reserved kung may demand, 0% kung wala,
-            # sa halip na 0/0 -> 0% na mukhang "walang kailangang i-reserve".
             pct_available_exact = 0
             pct_reserved_exact = 100 if reserve_exact > 0 else 0
 
-        # Buffered version: ang TIYAK na commitment ay walang buffer
-        # (dahil totoo na ito), pero ang PREDICTED part ay bibigyan ng
-        # +15% safety margin
         reserve_buffered = pending_qty + round(predicted_pharmacy_request * (1 + req.safety_buffer_percent))
         available_buffered = max(0, stock - reserve_buffered)
         if stock > 0:
@@ -468,6 +597,8 @@ def predict_distribution(req: PredictRequest):
         else:
             pct_available_buffered = 0
             pct_reserved_buffered = 100 if reserve_buffered > 0 else 0
+
+        pkg = packaging_by_med.get(med, {})
 
         result_per_medicine.append({
             "medicine_name": med,
@@ -484,60 +615,208 @@ def predict_distribution(req: PredictRequest):
             "available_for_96_barangays_buffered": available_buffered,
             "percentage_available_for_barangays_buffered": pct_available_buffered,
             "stock_status": "⚠️ SHORTAGE - hindi sapat kahit para lang sa pharmacy" if stock < reserve_buffered else "✅ SUFFICIENT",
+            "pieces_per_box": pkg.get("pieces_per_box"),
+            "pieces_per_strip": pkg.get("pieces_per_strip"),
         })
 
-        # ---------- PLAIN ARITHMETIC mula rito pababa -- WALANG ML.
-        # `attach_equal_split()` (barangay_distribution.py) ay floor
-        # division + remainder lang, batay sa "equal for all" na policy.
-        #
-        # `available_exact`/`available_buffered` = `stock` (PIECES) minus
-        # reserve, so they're PIECES too -- same reasoning as `stock_unit`
-        # above. Labeling the per-barangay split with `unit` (e.g. "Box")
-        # made "5 Box x 96 brgy" look like 480 BOXES needed, when it's
-        # really 480 PIECES (~5 real boxes) being split across barangays.
-        # ----------
-        distribution_exact.append(attach_equal_split(med, available_exact, num_brgy, stock_unit))
-        distribution_buffered.append(attach_equal_split(med, available_buffered, num_brgy, stock_unit))
+        distribution_exact.append(attach_equal_split(
+            med, available_exact, num_brgy, stock_unit,
+            pieces_per_box=pkg.get("pieces_per_box"),
+            pieces_per_strip=pkg.get("pieces_per_strip"),
+        ))
+        distribution_buffered.append(attach_equal_split(
+            med, available_buffered, num_brgy, stock_unit,
+            pieces_per_box=pkg.get("pieces_per_box"),
+            pieces_per_strip=pkg.get("pieces_per_strip"),
+        ))
 
-    # ---------- G) TUNAY NA PER-BARANGAY RECOMMENDATION (barangay_distribution.py) ----------
-    # Hindi lang aggregate/bilang -- listahan na ng SINONG barangay
-    # (destination_id + pangalan) at ILAN eksakto ang matatanggap nila,
-    # kasama na ang patas na paghahati ng leftover. Muli, WALANG ML dito.
     barangay_recommendation_exact = build_equal_barangay_recommendation(distribution_exact, barangay_list)
     barangay_recommendation_buffered = build_equal_barangay_recommendation(distribution_buffered, barangay_list)
 
-    # ---------- LOG sa ml_predictions_log (best-effort, hindi dapat
-    # makasira sa response kahit mag-fail ang pag-log) ----------
-    try:
-        log_predictions_to_supabase(
-            result_per_medicine, barangay_recommendation_exact,
-            req.forecast_days_ahead
-        )
-    except Exception as log_err:
-        print(f"[WARN] Hindi na-log ang prediction: {log_err}")
+    # ============================================================
+    # >>> BAGO: WEEKLY / MONTHLY / SEASONAL na FORECAST breakdown --
+    # ito ang hiniling na "seasonal, weekly, and monthly na forecast
+    # demand". Base ito sa PAREHONG events_df na ginamit na para sa
+    # total_demand sa itaas -- kino-compute lang natin ito sa TATLONG
+    # magkaibang paraan ng pag-group (linggo, buwan, at season).
+    # Para sa bawat period, kasama ang TOTAL predicted quantity, at
+    # ang TOP medicines para doon (para makabuluhan agad ang display,
+    # hindi lang isang malaking number).
+    # ============================================================
+
+    # ---------- WEEKLY ----------
+    weekly_totals = (
+        events_df.groupby(["year", "week_of_year"])["predicted_quantity_requested"]
+        .sum().reset_index().rename(columns={"predicted_quantity_requested": "total_qty"})
+        .sort_values(["year", "week_of_year"])
+    )
+    weekly_by_med = (
+        events_df.groupby(["year", "week_of_year", "medicine_name"])["predicted_quantity_requested"]
+        .sum().reset_index().rename(columns={"predicted_quantity_requested": "qty"})
+    )
+    demand_by_week = []
+    for _, wk in weekly_totals.iterrows():
+        yr, week = int(wk["year"]), int(wk["week_of_year"])
+        meds = weekly_by_med[(weekly_by_med["year"] == yr) & (weekly_by_med["week_of_year"] == week)]
+        # >>> BAGO: TANGGAL na ang head(5) limit -- ibinabalik na LAHAT
+        # ng gamot na may forecasted quantity para sa linggong ito
+        # (naka-sort pa rin pababa base sa dami). Ang frontend na lang
+        # ang bahalang mag-slice(0,5) para sa compact na inline view,
+        # at may "Ipakita lahat" na magbubukas ng buong listahan sa
+        # modal kung kailangan.
+        meds = meds.sort_values("qty", ascending=False)
+        try:
+            week_start = pd.Timestamp.fromisocalendar(yr, week, 1)  # Lunes ng linggong 'yon
+            week_label = week_start.strftime("Week of %b %d, %Y")
+        except Exception:
+            week_label = f"Week {week}, {yr}"
+        demand_by_week.append({
+            "year": yr,
+            "week_of_year": week,
+            "week_label": week_label,
+            "total_predicted_quantity": int(wk["total_qty"]),
+            "top_medicines": [
+                {"medicine_name": m["medicine_name"], "quantity": int(m["qty"])}
+                for _, m in meds.iterrows()
+            ],
+        })
+
+    # ---------- MONTHLY ----------
+    monthly_totals = (
+        events_df.groupby(["year", "month"])["predicted_quantity_requested"]
+        .sum().reset_index().rename(columns={"predicted_quantity_requested": "total_qty"})
+        .sort_values(["year", "month"])
+    )
+    monthly_by_med = (
+        events_df.groupby(["year", "month", "medicine_name"])["predicted_quantity_requested"]
+        .sum().reset_index().rename(columns={"predicted_quantity_requested": "qty"})
+    )
+    demand_by_month = []
+    for _, mo in monthly_totals.iterrows():
+        yr, mn = int(mo["year"]), int(mo["month"])
+        meds = monthly_by_med[(monthly_by_med["year"] == yr) & (monthly_by_med["month"] == mn)]
+        # >>> BAGO: TANGGAL na ang head(5) limit -- kaparehong dahilan
+        # ng Weekly sa itaas.
+        meds = meds.sort_values("qty", ascending=False)
+        month_label = pd.Timestamp(year=yr, month=mn, day=1).strftime("%B %Y")
+        demand_by_month.append({
+            "year": yr,
+            "month": mn,
+            "month_label": month_label,
+            "total_predicted_quantity": int(mo["total_qty"]),
+            "top_medicines": [
+                {"medicine_name": m["medicine_name"], "quantity": int(m["qty"])}
+                for _, m in meds.iterrows()
+            ],
+        })
+
+    # ---------- SEASONAL (Wet: Jun-Nov, Dry: Dec-May -- parehong get_season() na ginagamit sa training) ----------
+    #
+    # >>> BAGO: HIWALAY na, MAS MAHABANG forecast horizon PARA LANG SA
+    # SEASONAL na tab -- hindi na ito umaasa sa parehong 30-araw na
+    # events_df ng Demand tab. Dating kung 30 araw lang ang window,
+    # ISANG season lang ang maaabot nito (kung saan man kasalukuyang
+    # nahuhulog ang petsa ngayon) -- imposibleng makita ang KABILANG
+    # season, kahit anong araw pa i-check. Ngayon, gumagawa tayo ng
+    # BAGONG, MAS MAHABANG forecast (SEASONAL_HORIZON_DAYS, sapat na
+    # para tiyak na masaklaw ang BUONG Wet + BUONG Dry season), gamit
+    # pa rin ang PAREHONG na-train na model -- iba lang ang haba ng
+    # tinitingnang hinaharap. Hindi na ito nakaka-apekto sa "Demand"/
+    # "Reserve" tabs (mananatili silang 30-araw, para sa near-term na
+    # pag-order desisyon) -- ang Seasonal tab lang ang gumagamit nito. <<<
+    # >>> FIX (bilis): binawasan mula 400 papuntang 200 araw -- ang
+    # PINAKAMALIIT na kailangan para ma-guarantee na masasaklaw ang
+    # PAREHONG Wet at Dry season (6 buwan bawat isa, ~183 araw) mula
+    # sa KAHIT ANONG petsa ngayon ay ~184 araw -- 200 ay may sapat
+    # nang buffer, at kalahati na lang ng dating computation cost. <<<
+    SEASONAL_HORIZON_DAYS = 200
+
+    # >>> BAGO: tignan muna ang cache bago mag-compute ulit -- kapag
+    # PAREHONG ARAW pa rin (walang pang bagong training/retrain), gamit
+    # na lang ang naunang resulta.
+    today_str = pd.Timestamp.today().strftime("%Y-%m-%d")
+    if _seasonal_cache["date"] == today_str and _seasonal_cache["demand_by_season"] is not None:
+        demand_by_season = _seasonal_cache["demand_by_season"]
+    else:
+        events_df_season_raw = build_pharmacy_request_forecast(SEASONAL_HORIZON_DAYS)
+
+        if events_df_season_raw.empty:
+            demand_by_season = []
+        else:
+            events_df_season = events_df_season_raw.copy()
+            events_df_season["season"] = events_df_season["month"].apply(get_season)
+            seasonal_totals = (
+                events_df_season.groupby("season")["predicted_quantity_requested"]
+                .sum().reset_index().rename(columns={"predicted_quantity_requested": "total_qty"})
+            )
+            seasonal_by_med = (
+                events_df_season.groupby(["season", "medicine_name"])["predicted_quantity_requested"]
+                .sum().reset_index().rename(columns={"predicted_quantity_requested": "qty"})
+            )
+            demand_by_season = []
+            for _, se in seasonal_totals.iterrows():
+                season = se["season"]
+                meds = seasonal_by_med[seasonal_by_med["season"] == season]
+                # >>> BAGO: TANGGAL na ang head(5) limit -- kaparehong dahilan.
+                meds = meds.sort_values("qty", ascending=False)
+                demand_by_season.append({
+                    "season": season,
+                    "total_predicted_quantity": int(se["total_qty"]),
+                    "top_medicines": [
+                        {"medicine_name": m["medicine_name"], "quantity": int(m["qty"])}
+                        for _, m in meds.iterrows()
+                    ],
+                })
+
+        # I-save sa cache PARA SA MGA SUSUNOD NA CALL NGAYONG ARAW
+        _seasonal_cache["date"] = today_str
+        _seasonal_cache["demand_by_season"] = demand_by_season
+
+    # >>> FIX v5.4 (dumaraming demand_forecasts + barangay_distributions):
+    # TINANGGAL na ang automatic na tawag papunta sa log_predictions_to_
+    # supabase() dito. Ang /predict-distribution endpoint na ito ay
+    # dapat "PREVIEW LANG" -- tinatawag ito TUWING nag-lo-load o
+    # nag-re-refresh ang dashboard (Demand Forecast + Barangay
+    # Distribution cards), hindi lang paminsan-minsan. Bago itong FIX,
+    # gumagawa ito ng BAGONG "draft" demand_forecasts row + "pending"
+    # barangay_distributions row PARA SA BAWAT GAMOT, TUWING lang may
+    # nag-view ng dashboard -- kahit walang totoong "Confirm & Save" na
+    # pinindot. Dahil dito, dumadami nang sobra ang dalawang table na
+    # 'yan sa bawat page load/refresh.
+    #
+    # Ang TAMANG "save" flow ay nasa /confirm-distribution endpoint na
+    # (save_confirmed_distribution() sa barangay_distribution.py) --
+    # doon lang dapat talaga sumusulat sa demand_forecasts/barangay_
+    # distributions, kapag EXPLICIT na pinindot ng staff ang
+    # "Confirm & Save" button. Kaya SAFE at TAMA na tanggalin ang
+    # awtomatikong pag-log dito -- hindi ito ginagamit ng frontend, at
+    # duplicate lang sa tamang confirm flow.
+    #
+    # (Ang log_predictions_to_supabase() function mismo ay INIWAN pa
+    # rin sa baba ng file, hindi tinanggal -- basta hindi na ito
+    # AWTOMATIKONG tinatawag. Kung sakaling kailangan pa ito balang
+    # araw para sa ibang layunin, hal. periodic snapshot logging para
+    # sa MAE tracking, puwede pa rin itong gamitin nang explicit.)
 
     return {
         "forecast_period_days": req.forecast_days_ahead,
         "number_of_barangays": num_brgy,
         "safety_buffer_percent_used": req.safety_buffer_percent,
 
-        # (1) KAILAN at ILAN -- bawat predicted request event ng pharmacy
         "predicted_pharmacy_requests_detail": predicted_requests,
         "predicted_pharmacy_requests_weekly": weekly.sort_values(["year", "week_of_year"]).to_dict(orient="records"),
         "predicted_pharmacy_requests_monthly": monthly.sort_values(["year", "month"]).to_dict(orient="records"),
 
-        # bilang, uri, percentage ng total predicted pharmacy requests
         "pharmacy_demand_summary": demand_summary_live.to_dict(orient="records"),
-
-        # (2) Reserve computation -- ilang percent/bilang ilalaan para sa pharmacy
         "stock_and_reserve_summary": result_per_medicine,
 
-        # (3a) Aggregate view: ilan bawat barangay (bilang lang, walang pangalan)
+        # >>> BAGO: weekly/monthly/seasonal forecast breakdown
+        "demand_by_week": demand_by_week,
+        "demand_by_month": demand_by_month,
+        "demand_by_season": demand_by_season,
+
         "barangay_equal_distribution_exact": distribution_exact,
         "barangay_equal_distribution_buffered": distribution_buffered,
-
-        # (3b) >>> BAGO (v5): TUNAY na recommendation -- per barangay,
-        # per medicine, may destination_id + pangalan + eksaktong bilang
         "barangay_recommendation_exact": barangay_recommendation_exact,
         "barangay_recommendation_buffered": barangay_recommendation_buffered,
     }
@@ -547,35 +826,23 @@ def log_predictions_to_supabase(
     result_per_medicine, barangay_recommendation_exact, forecast_days_ahead
 ):
     """
-    I-save sa 'demand_forecasts' (ML output, base + buffer, status='draft')
-    at 'barangay_distributions' (recommended na distribution per barangay,
-    status='pending') ang resulta ng bawat prediction run.
-
-    >>> BAGO (v5): ang na-i-save sa barangay_distributions ngayon ay
-    ang MISMONG `barangay_recommendation_exact` (may kasama nang leftover
-    allocation), kaya EKSAKTONG tugma ang naka-log sa database sa
-    ipinapakitang recommendation sa response ng /predict-distribution. <<<
+    >>> PAALALA: hindi na ito AWTOMATIKONG tinatawag ng predict_
+    distribution() (tingnan ang FIX v5.4 note sa itaas). Naiwan pa rin
+    ang function na ito dito para pwede pa ring gamitin nang explicit
+    balang araw kung kakailanganin (hal. periodic snapshot logging),
+    pero hindi na ito bahagi ng normal na request/response flow. <<<
     """
     sb = get_supabase()
     if sb is None:
         return
 
-    # ---------- 1. I-map ang medicine_name (TEXT) papunta sa
-    # medicine_id (UUID) gamit ang 'medicines' table ----------
     med_resp = sb.table("medicines").select("medicine_id, generic_name").execute()
     name_to_id = {row["generic_name"]: row["medicine_id"] for row in med_resp.data}
 
-    # ---------- 2. Forecast period bilang rolling window (hal.
-    # '20260817-20260916'). "YYYYMMDD-YYYYMMDD" (17 chars) dahil ang
-    # demand_forecasts.forecast_period ay varchar(20) lang sa DB -- ang
-    # dating "YYYY-MM-DD_to_YYYY-MM-DD" (24 chars) ay sumasabog dito
-    # (Postgres error 22001 "value too long"). ----------
     today = pd.Timestamp.today().normalize()
     end_date = today + pd.Timedelta(days=forecast_days_ahead)
     forecast_period = f"{today.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
 
-    # ---------- 3. Insert sa demand_forecasts (status: draft), isa
-    # bawat gamot; itago ang forecast_id para gamitin sa distributions ----------
     forecast_id_by_med = {}
     for row in result_per_medicine:
         med_name = row["medicine_name"]
@@ -598,9 +865,6 @@ def log_predictions_to_supabase(
         if fc_resp.data:
             forecast_id_by_med[med_name] = fc_resp.data[0]["forecast_id"]
 
-    # ---------- 4. Insert sa barangay_distributions (status: pending),
-    # DIRETSO mula sa barangay_recommendation_exact -- kasama na ang
-    # tamang leftover allocation, walang duplicate logic ----------
     dist_rows = []
     for rec in barangay_recommendation_exact:
         med_name = rec["medicine_name"]
@@ -623,14 +887,17 @@ def log_predictions_to_supabase(
 def log_retrain_to_supabase(trigger_source: str, result: dict = None,
                              status: str = "success", error_message: str = None,
                              duration_seconds: float = None):
-    """I-save sa ml_model_versions ang resulta ng bawat retrain attempt."""
     global CURRENT_MODEL_VERSION
     sb = get_supabase()
     if sb is None:
         return
     new_version = pd.Timestamp.now().strftime("v%Y%m%d_%H%M%S")
     try:
-        sb.table("ml_model_versions").insert({
+        # >>> BAGO: "warehouse_ml_model_versions" na ito (hindi na
+        # "ml_model_versions") -- hiwalay na table para sa WAREHOUSE ML
+        # model history, para hindi magkahalo sa ml_model_versions na
+        # ginagamit na ng PHARMACY side (ibang ML system). <<<
+        sb.table("warehouse_ml_model_versions").insert({
             "model_version": new_version,
             "trigger_source": trigger_source,
             "rows_used": result["rows_used"] if result else 0,
@@ -653,10 +920,6 @@ class ConfirmDistributionRow(BaseModel):
 
 
 class ConfirmDistributionRequest(BaseModel):
-    # "auto" -- yung recommendation, sinunod nang buo, walang binago
-    # "manual" -- ganap na pinili ng warehouse staff ang gamot at quantity
-    # bawat barangay. BUONG plan lang, walang paghahalo (base sa policy
-    # ng RHU Lopez -- Auto o Manual lang, hindi pwedeng magkahalo).
     source: str
     rows: List[ConfirmDistributionRow]
     forecast_period_days: Optional[int] = 30
@@ -664,15 +927,6 @@ class ConfirmDistributionRequest(BaseModel):
 
 @app.post("/confirm-distribution")
 def confirm_distribution(req: ConfirmDistributionRequest):
-    """
-    I-save ang FINAL na desisyon ng warehouse staff (auto o manual) bilang
-    'confirmed' na distribution plan sa 'barangay_distributions' table.
-
-    Tinatawag ito ng "Confirm & Save" button sa Barangay Distribution card
-    sa dashboard. Hiwalay ito sa /predict-distribution (na paulit-ulit na
-    tumatakbo bilang PREVIEW/draft lang) -- ito na yung TALAGANG desisyon
-    na ipapatupad.
-    """
     sb = get_supabase()
     if sb is None:
         raise HTTPException(500, "Walang SUPABASE_URL/SUPABASE_KEY na naka-set.")
@@ -687,11 +941,6 @@ def confirm_distribution(req: ConfirmDistributionRequest):
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
-        # Kahit anong DB-level na error (hal. Postgres constraint violation)
-        # ay dating tumatakas dito bilang plain-text 500 -- sinisira nito
-        # ang res.json() ng Next.js proxy (nagreresulta sa maling "Hindi
-        # ma-reach ang ML service"). I-wrap bilang JSON HTTPException para
-        # makita ang TUNAY na dahilan.
         raise HTTPException(500, f"Hindi na-save ang distribution plan: {e}")
 
     return result
@@ -699,43 +948,24 @@ def confirm_distribution(req: ConfirmDistributionRequest):
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "message": "Warehouse ML service v5 is running."}
+    return {"status": "ok", "message": "Warehouse ML service v5.4 is running (DEBUG mode)."}
 
 
-# ============================================================
-# AUTOMATIC RETRAINING
-# ============================================================
-# Cooldown -- huwag mag-retrain nang mas madalas sa itakdang minuto,
-# kahit paulit-ulit tawagin ang endpoint na ito (hal. maraming
-# 'received' na request sabay-sabay). Baguhin ang RETRAIN_COOLDOWN_SECONDS
-# kung gusto mo ng mas madalas/bihirang retraining.
 RETRAIN_COOLDOWN_SECONDS = 60 * 60  # 1 oras
 _last_retrain_time = 0
-CURRENT_MODEL_VERSION = "v_initial"  # mababago tuwing successful ang retrain
+CURRENT_MODEL_VERSION = "v_initial"
 
-WEBHOOK_SECRET = os.environ.get("RETRAIN_WEBHOOK_SECRET")  # optional, para sa security
+WEBHOOK_SECRET = os.environ.get("RETRAIN_WEBHOOK_SECRET")
 
 
 class RetrainRequest(BaseModel):
-    force: Optional[bool] = False   # i-bypass ang cooldown kung True
-    secret: Optional[str] = None    # dapat tumugma sa RETRAIN_WEBHOOK_SECRET kung naka-set
+    force: Optional[bool] = False
+    secret: Optional[str] = None
 
 
 @app.post("/retrain")
 def retrain_model(req: RetrainRequest = RetrainRequest()):
-    """
-    Ito ang tinatawag ng Supabase Database Webhook tuwing may
-    pharmacy_requests row na naging status = 'received' (o kahit
-    anong bagong data na dapat isama sa training).
-
-    May built-in COOLDOWN para hindi ito paulit-ulit na tumatakbo sa
-    loob ng maikling panahon (mahal ang training sa oras/resources
-    kung sobrang dalas gawin).
-
-    Bawat pagkakataon (success, failed, o skipped) ay naka-log sa
-    ml_retrain_log para masubaybayan ang health ng auto-retraining.
-    """
-    global _last_retrain_time, _cache
+    global _last_retrain_time, _cache, _seasonal_cache
 
     trigger_source = "webhook" if req.secret else "manual"
 
@@ -746,8 +976,6 @@ def retrain_model(req: RetrainRequest = RetrainRequest()):
     seconds_since_last = now - _last_retrain_time
     if not req.force and seconds_since_last < RETRAIN_COOLDOWN_SECONDS:
         wait_more = int(RETRAIN_COOLDOWN_SECONDS - seconds_since_last)
-        # Hindi na-lo-log ang 'skipped' sa ml_model_versions dahil ang
-        # CHECK constraint niyan ay success/failed lang -- console log na lang
         print(f"[INFO] Retrain skipped -- cooldown active, {wait_more}s pa")
         return {
             "status": "skipped",
@@ -770,10 +998,11 @@ def retrain_model(req: RetrainRequest = RetrainRequest()):
         raise HTTPException(400, str(e))
     duration = round(time.time() - start_time, 2)
 
-    # I-clear ang in-memory cache para ma-reload ang BAGONG na-save na
-    # models sa susunod na prediction request -- WALANG kailangang
-    # i-restart pa ang uvicorn
     _cache = None
+    # >>> BAGO: i-reset din ang seasonal cache -- bagong model na,
+    # kaya kailangang i-compute ulit ang seasonal forecast (hindi na
+    # dapat gamitin ang lumang cached na resulta mula sa lumang model).
+    _seasonal_cache = {"date": None, "demand_by_season": None}
     _last_retrain_time = now
 
     log_retrain_to_supabase(trigger_source, result=result, status="success",

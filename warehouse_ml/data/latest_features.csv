@@ -1,5 +1,21 @@
 medicine_name,medicine_category,rolling_avg_recent,same_month_last_year,days_since_last_request
-Losartan,drugs,1.0,1.0,0.0
-Facemask,supplies,20.6,20.6,14.0
-Medicol,drugs,18.0,18.0,3.0
-Paracetamol,drugs,12.5,12.5,9.0
+Loperamide,drugs,2.6666666666666665,2.5,1.0
+Cotton Balls,supplies,1.6666666666666667,2.4375,2.0
+ORS (Oral Rehydration Salts),drugs,4.666666666666667,5.666666666666667,0.0
+Alcohol,supplies,2.0,2.3333333333333335,0.0
+Syringe,supplies,1.3333333333333333,2.375,2.0
+Cefalexin,drugs,3.3333333333333335,2.0,0.0
+Disposable Gloves,supplies,2.6666666666666665,1.8888888888888888,2.0
+Losartan,drugs,3.3333333333333335,4.384615384615385,2.0
+Amoxicillin,drugs,3.3333333333333335,5.117647058823529,1.0
+Cetirizine,drugs,3.0,4.0,3.0
+Paracetamol,drugs,7.666666666666667,6.357142857142857,1.0
+Mefenamic Acid,drugs,6.0,4.266666666666667,0.0
+Ferrous Sulfate,drugs,3.3333333333333335,4.357142857142857,1.0
+Multivitamins,drugs,5.333333333333333,5.2631578947368425,1.0
+Salbutamol Nebule,drugs,2.0,3.0,0.0
+Ibuprofen,drugs,3.6666666666666665,4.0,1.0
+Ascorbic Acid,drugs,6.333333333333333,3.909090909090909,1.0
+Biogesic,drugs,6.0,6.208333333333333,1.0
+Metformin,drugs,5.0,4.571428571428571,0.0
+Facemask,supplies,2.3333333333333335,3.0,2.0
