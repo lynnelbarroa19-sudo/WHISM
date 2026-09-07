@@ -588,8 +588,8 @@ export default function MedicineStockPage() {
           {/* ── Page header ── */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
             <div>
-              <p style={{ color: T.mint, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 4, margin: 0 }}>Warehouse</p>
-              <h1 style={{ fontSize: 34, fontWeight: 900, color: dk ? T.mint : T.green, margin: 0, lineHeight: 1 }}>MEDICINE INVENTORY</h1>
+              <p style={{ color: '#6f6f6f', fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 4, margin: 0 }}>Warehouse</p>
+              <h1 style={{ fontSize: 34, fontWeight: 900, color: '#000', margin: 0, lineHeight: 1 }}>MEDICINE INVENTORY</h1>
             </div>
             {activeTab !== 'archived' && (
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

@@ -368,9 +368,9 @@ export default function PharmacyRequestsRecordsPage() {
 
           {/* ── Page header ── */}
           <div style={{ marginBottom: 20 }}>
-            <p style={{ color: T.mint, fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 4, margin: 0 }}>Warehouse</p>
-            <h1 style={{ fontSize: 34, fontWeight: 900, color: dk ? T.mint : T.green, margin: 0, lineHeight: 1 }}>PHARMACY REQUESTS</h1>
-            <div style={{ fontSize: 13, color: txt2, marginTop: 4, fontWeight: 600 }}>Every restock request submitted by Pharmacy, with live status</div>
+            <p style={{ color: '#636363', fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 4, margin: 0 }}>Warehouse</p>
+            <h1 style={{ fontSize: 34, fontWeight: 900, color: '#000', margin: 0, lineHeight: 1 }}>PHARMACY REQUESTS</h1>
+            <div style={{ fontSize: 13, color: txt2, marginTop: 4, fontWeight: 600 }}></div>
           </div>
 
           {/* ── Filter bar ── */}
