@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect, useMemo } from 'react'
 import styles from './warehouse.module.css'
+import { useWarehousePrediction } from './Usewarehouseprediction'
 
 // ---- Response shape returned by /api/warehouse-predict (proxies to
 // warehouse_ml/api_server.py's POST /predict-distribution). Ito yung
@@ -22,17 +23,15 @@ interface StockReserveRow {
   medicine_name: string
   unit: string
   current_stock_sa_warehouse?: number
-  // >>> BAGO: kailangan ito para malaman kung ilang pieces ang 1 box/
-  // strip ng gamot na ito -- ginagamit sa Manual mode para i-convert
-  // ang tina-type (box/strip/pcs) papuntang pieces bago i-save. <<<
   pieces_per_box?: number | null
   pieces_per_strip?: number | null
+  // >>> BAGO: klase ng gamot (Tablet/Capsule/Suspension/Drops/atbp.)
+  // mula sa medicines.dosage_form -- ipinapakita bilang badge sa
+  // medicine list, at ginagamit para pilitin ang "pcs"-lang na input
+  // kapag Drops (tingnan ang isDropsForm() sa ibaba).
+  dosage_form?: string | null
 }
 
-// Aggregate (no barangay names) split per medicine -- cascading box/strip/
-// piece breakdown + `leftover_units`, ang natitirang PIECES na hindi na
-// mahahati pantay-pantay (pinakamaliit na unit na, HINDI ibinigay sa
-// kahit kaninong barangay -- nananatili sa warehouse).
 interface EqualDistributionRow {
   medicine_name: string
   unit: string
@@ -54,9 +53,6 @@ interface PredictResponse {
 
 type BufferMode = 'exact' | 'buffered'
 type PlanMode = 'auto' | 'manual'
-// >>> BAGO: unit na ginagamit habang nagtu-type sa Manual mode.
-// Palaging naka-store ang manualPlan sa PIECES sa ilalim ng lahat --
-// ito lang ang nagbabago kung PAANO binabasa/isinusulat ang value. <<<
 type InputUnit = 'box' | 'strip' | 'pcs'
 
 interface MedicineGroup {
@@ -67,24 +63,29 @@ interface MedicineGroup {
   perBarangayBoxes: number
   perBarangayStrips: number
   perBarangayPieces: number
-  // >>> BAGO: total sa PIECES na natatanggap ng ISANG barangay (boxes +
-  // strips + pcs, lahat pinagsama sa piece equivalent) -- ito ang
-  // "= X pcs total" na idinadagdag natin sa display, para malinaw kahit
-  // may box/strip na component ang breakdown.
   perBarangayTotalPieces: number
   rows: BarangayRecommendationRow[]
 }
 
-// >>> BAGO: ipakita ang cascading breakdown bilang "X box + Y strip +
-// Z pcs" -- direkta nang naka-compute ang boxes/strips/pieces mula sa
-// backend (hindi na kailangang i-convert pa mula sa raw pieces).
-//
-// >>> BAGO PA: kung MIXED units ang breakdown (may box at/o strip
-// kasama ang pcs), idinadagdag ang eksaktong "(= N pcs total)" sa
-// dulo, para laging malinaw ang totoong dami kahit boxes/strips pa
-// ang laman -- ito yung hiniling na "gusto ko merong naka box, strips
-// at total pcs". Kung pcs lang naman talaga ang laman (walang box/
-// strip), hindi na kailangan pang ulitin ang parehong number. <<<
+// >>> BAGO: helpers para sa dosage_form (Tablet/Capsule/Suspension/
+// Drops/atbp.) -- ginagamit para ipakita ang klase ng gamot bilang
+// badge, at para malaman kung "Drops" (dapat i-pilit na "pcs" lang
+// ang input unit, hindi Box/Strip -- karaniwang bote-bote, hindi
+// strip/blister pack, ang packaging ng drops).
+function isDropsForm(form?: string | null): boolean {
+  return !!form && form.toLowerCase().includes('drop')
+}
+
+function formIcon(form?: string | null): string {
+  const f = (form || '').toLowerCase()
+  if (f.includes('drop')) return '💧'
+  if (f.includes('nebule') || f.includes('inhal')) return '💨'
+  if (f.includes('syrup') || f.includes('suspension')) return '🧴'
+  if (f.includes('capsule')) return '💊'
+  if (f.includes('tablet')) return '💊'
+  return '💊'
+}
+
 function formatPackagingBreakdown(
   boxes: number,
   strips: number,
@@ -105,48 +106,29 @@ function formatPackagingBreakdown(
   return breakdown
 }
 
-// >>> BAGO: kinukuha ang TOTAL na available stock PARA SA BARANGAY
-// DISTRIBUTION (available_for_distribution -- ibig sabihin, kasama pa
-// ang leftover, HINDI lang ang per-barangay na bahagi), tapos ika-
-// convert papuntang "X box + Y strip + Z pcs" gamit ang totoong
-// pieces_per_box/pieces_per_strip ng gamot. Cascading conversion din
-// ito (box muna, tapos strip mula sa natira, tapos pcs) -- kapareho
-// ng logic sa formatBoxStripPiece() sa PredictionCard.tsx, para
-// magkatugma ang dalawang card. Kung walang box/strip packaging info
-// ang gamot, plain pieces na lang ang ipapakita. <<<
 function formatTotalAvailableBreakdown(
   totalPieces: number,
   piecesPerBox?: number | null,
   piecesPerStrip?: number | null
 ): string {
   if (totalPieces <= 0) return '0 pcs'
-
   const hasBox = !!piecesPerBox && piecesPerBox > 0
   const hasStrip = !!piecesPerStrip && piecesPerStrip > 0
-
-  if (!hasBox && !hasStrip) {
-    return `${totalPieces.toLocaleString()} pcs`
-  }
+  if (!hasBox && !hasStrip) return `${totalPieces.toLocaleString()} pcs`
 
   let remaining = totalPieces
   const parts: string[] = []
-
   if (hasBox) {
     const boxes = Math.floor(remaining / piecesPerBox!)
     remaining -= boxes * piecesPerBox!
     if (boxes > 0) parts.push(`${boxes} box${boxes !== 1 ? 'es' : ''}`)
   }
-
   if (hasStrip) {
     const strips = Math.floor(remaining / piecesPerStrip!)
     remaining -= strips * piecesPerStrip!
     if (strips > 0) parts.push(`${strips} strip${strips !== 1 ? 's' : ''}`)
   }
-
-  if (remaining > 0 || parts.length === 0) {
-    parts.push(`${remaining} pcs`)
-  }
-
+  if (remaining > 0 || parts.length === 0) parts.push(`${remaining} pcs`)
   return parts.join(' + ')
 }
 
@@ -176,91 +158,30 @@ function groupByMedicine(rows: BarangayRecommendationRow[]): MedicineGroup[] {
     .sort((a, b) => b.totalUnits - a.totalUnits)
 }
 
-// destination_id -> quantity SA PIECES, para sa isang gamot
 type ManualQtyMap = Record<string, number>
-// medicine_name -> ManualQtyMap
 type ManualPlan = Record<string, ManualQtyMap>
 
 export default function BarangayDistributionCard() {
-  const [data, setData] = useState<PredictResponse | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [lastComputed, setLastComputed] = useState<Date | null>(null)
-  const [refreshing, setRefreshing] = useState(false)
+  const { data, loading, error, refreshing, lastComputed, refresh: fetchPrediction } = useWarehousePrediction() as {
+    data: PredictResponse | null
+    loading: boolean
+    error: string
+    refreshing: boolean
+    lastComputed: Date | null
+    refresh: () => void
+  }
 
-  // >>> FIX: dating naka-default sa 'exact', pero ang Demand Forecast
-  // card (PredictionCard.tsx) ay LAGING nagpapakita ng BUFFERED na
-  // numero sa Reserve tab niya (walang toggle doon -- naka-fix sa
-  // reserve_for_pharmacy_buffered_15pct / available_for_96_barangays_
-  // buffered). Kapag 'exact' ang default dito, magkaibang baseline
-  // "available stock" ang ginagamit ng dalawang card kaya HINDI
-  // magtutugma ang "Matitira" (Demand Forecast) at ang recommendation
-  // (Barangay Distribution) -- ito yung na-obserbahan sa Facemask.
-  // Ngayon, 'buffered' ang default dito para laging magkatugma sila
-  // sa unang tingin. Pwede pa ring i-switch ng user papuntang 'Exact'
-  // kung gusto niya -- alamin lang niya na iiba ito sa laging-buffered
-  // na Demand Forecast Reserve tab. <<<
   const [bufferMode, setBufferMode] = useState<BufferMode>('buffered')
   const [planMode, setPlanMode] = useState<PlanMode>('auto')
   const [activeMed, setActiveMed] = useState<string | null>(null)
   const [query, setQuery] = useState('')
 
-  // ---- Manual mode state ----
   const [manualPlan, setManualPlan] = useState<ManualPlan>({})
   const [fillAllValue, setFillAllValue] = useState('')
-  // >>> BAGO: anong unit ang ipinapakita/tina-type sa Manual mode ngayon.
-  // Global lang ito (hindi per-medicine) para simple -- kapag lumipat ka
-  // ng gamot na walang box/strip packaging, awtomatikong babalik sa 'pcs'. <<<
   const [inputUnit, setInputUnit] = useState<InputUnit>('pcs')
 
-  // ---- Save state ----
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState<{ type: 'ok' | 'error'; text: string } | null>(null)
-
-  useEffect(() => {
-    fetchPrediction()
-  }, [])
-
-  const fetchPrediction = async () => {
-    if (lastComputed) setRefreshing(true)
-    else setLoading(true)
-    setError('')
-
-    try {
-      const res = await fetch('/api/warehouse-predict', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      })
-      const json = await res.json()
-
-      if (!res.ok) {
-        let reason = ''
-        if (typeof json.detail === 'string') {
-          try {
-            reason = JSON.parse(json.detail)?.detail || json.detail
-          } catch {
-            reason = json.detail
-          }
-        }
-        setError([json.error, reason].filter(Boolean).join(' — ') || 'Could not load the barangay recommendation.')
-        setData(null)
-        setLoading(false)
-        setRefreshing(false)
-        return
-      }
-
-      setData(json)
-      setLastComputed(new Date())
-    } catch (err) {
-      console.error('BarangayDistributionCard fetch error:', err)
-      setError('Could not reach the prediction service.')
-      setData(null)
-    }
-
-    setLoading(false)
-    setRefreshing(false)
-  }
 
   const autoRows = bufferMode === 'exact'
     ? data?.barangay_recommendation_exact || []
@@ -301,10 +222,7 @@ export default function BarangayDistributionCard() {
     for (const g of autoGroups) if (!map.has(g.medicine_name)) map.set(g.medicine_name, g.unit)
     return map
   }, [data, autoGroups])
-  const unitFor = (medName: string) => unitByMed.get(medName) || 'unit'
 
-  // >>> BAGO: packaging conversion (pieces_per_box/pieces_per_strip) per
-  // gamot, para ma-convert ng Manual mode input papuntang totoong pieces.
   const packagingByMed = useMemo(() => {
     const map = new Map<string, { piecesPerBox: number | null; piecesPerStrip: number | null }>()
     for (const r of data?.stock_and_reserve_summary || []) {
@@ -312,6 +230,17 @@ export default function BarangayDistributionCard() {
         piecesPerBox: r.pieces_per_box ?? null,
         piecesPerStrip: r.pieces_per_strip ?? null,
       })
+    }
+    return map
+  }, [data])
+
+  // >>> BAGO: medicine_name -> dosage_form (Tablet/Capsule/Suspension/
+  // Drops/atbp.), para ipakita bilang badge at para malaman kung
+  // "Drops" ang kasalukuyang piniling gamot.
+  const dosageFormByMed = useMemo(() => {
+    const map = new Map<string, string | null | undefined>()
+    for (const r of data?.stock_and_reserve_summary || []) {
+      map.set(r.medicine_name, r.dosage_form)
     }
     return map
   }, [data])
@@ -330,21 +259,20 @@ export default function BarangayDistributionCard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [planMode, autoGroups, allMedicineNames])
 
-  // >>> BAGO: kapag lumipat ng gamot at wala palang box/strip packaging
-  // ang bagong active na gamot, i-reset pabalik sa 'pcs' -- iwas
-  // multiply-by-null/0 na bug.
   useEffect(() => {
     if (!activeMed) return
     const pkg = packagingByMed.get(activeMed)
-    if (inputUnit === 'box' && !pkg?.piecesPerBox) setInputUnit('pcs')
-    if (inputUnit === 'strip' && !pkg?.piecesPerStrip) setInputUnit('pcs')
+    const dropsForm = isDropsForm(dosageFormByMed.get(activeMed))
+    if (inputUnit === 'box' && (!pkg?.piecesPerBox || dropsForm)) setInputUnit('pcs')
+    if (inputUnit === 'strip' && (!pkg?.piecesPerStrip || dropsForm)) setInputUnit('pcs')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMed])
 
   const activeGroup = groups?.find(g => g.medicine_name === activeMed) || null
   const activePkg = activeMed ? packagingByMed.get(activeMed) : undefined
+  const activeDosageForm = activeMed ? dosageFormByMed.get(activeMed) : undefined
+  const activeIsDrops = isDropsForm(activeDosageForm)
 
-  // Conversion factor papunta sa PIECES, base sa kasalukuyang inputUnit.
   const activeMultiplier = useMemo(() => {
     if (inputUnit === 'box') return activePkg?.piecesPerBox || 0
     if (inputUnit === 'strip') return activePkg?.piecesPerStrip || 0
@@ -362,8 +290,6 @@ export default function BarangayDistributionCard() {
     return q ? barangayList.filter(b => b.barangay_name.toLowerCase().includes(q)) : barangayList
   }, [barangayList, query])
 
-  // `qty` dito ay NASA KASALUKUYANG inputUnit (box/strip/pcs) -- iko-convert
-  // papuntang pieces bago i-store sa manualPlan.
   const setManualQty = (medName: string, destId: string, qtyInCurrentUnit: number) => {
     const multiplier = activeMultiplier || 1
     const qtyInPieces = qtyInCurrentUnit * multiplier
@@ -470,11 +396,11 @@ export default function BarangayDistributionCard() {
     return (
       <div style={{ ...cardStyle, height: '100%', display: 'flex', flexDirection: 'column' }}>
         <div style={{ ...headerStyle, flexShrink: 0 }}>
-          <span style={headerTitleStyle}>🗺️ BARANGAY DISTRIBUTION</span>
+          <HeaderTitle />
         </div>
-        <div style={{ padding: '12px 16px 14px', flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ padding: '17px 20px', flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
           {[100, 80, 60].map((w, i) => (
-            <div key={i} className={styles.predSkeletonBar} style={{ height: 30, width: `${w}%`, borderRadius: 8 }} />
+            <div key={i} className={styles.predSkeletonBar} style={{ height: 40, width: `${w}%`, borderRadius: 10 }} />
           ))}
         </div>
       </div>
@@ -485,17 +411,12 @@ export default function BarangayDistributionCard() {
     return (
       <div style={{ ...cardStyle, height: '100%' }}>
         <div style={headerStyle}>
-          <span style={headerTitleStyle}>🗺️ BARANGAY DISTRIBUTION</span>
+          <HeaderTitle />
         </div>
-        <div style={{ padding: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, background: '#fee2e2', color: '#dc2626', padding: '10px 12px', borderRadius: 8, fontSize: 12 }}>
+        <div style={{ padding: 22 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, background: '#fee2e2', color: '#dc2626', padding: '14px 16px', borderRadius: 12, fontSize: 11.5 }}>
             <span>⚠ {error}</span>
-            <button
-              onClick={fetchPrediction}
-              style={{ background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 700, cursor: 'pointer', flexShrink: 0 }}
-            >
-              Retry
-            </button>
+            <button onClick={fetchPrediction} style={retryButtonStyle}>Retry</button>
           </div>
         </div>
       </div>
@@ -505,37 +426,31 @@ export default function BarangayDistributionCard() {
   return (
     <div style={{ ...cardStyle, height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ ...headerStyle, flexShrink: 0 }}>
-        <span style={headerTitleStyle}>🗺️ BARANGAY DISTRIBUTION</span>
-        <span style={headerMetaStyle}>{totalBarangays} Barangays · Equal Split</span>
+        <HeaderTitle />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <span style={headerChipStyle(true)}>{totalBarangays} barangays</span>
+          <span style={headerChipStyle(false)}>Equal split</span>
+        </div>
       </div>
 
-      <div style={{ padding: '12px 16px 14px', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ padding: '17px 20px 19px', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 16 }}>
 
-        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-          <button
-            onClick={() => { setPlanMode('auto'); setSaveMsg(null) }}
-            style={modeButtonStyle(planMode === 'auto')}
-          >
+        <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+          <button onClick={() => { setPlanMode('auto'); setSaveMsg(null) }} style={modeButtonStyle(planMode === 'auto')}>
             <span style={{ fontSize: 14 }}>🤖</span> Auto
           </button>
-          <button
-            onClick={() => { setPlanMode('manual'); setSaveMsg(null) }}
-            style={modeButtonStyle(planMode === 'manual')}
-          >
+          <button onClick={() => { setPlanMode('manual'); setSaveMsg(null) }} style={modeButtonStyle(planMode === 'manual')}>
             <span style={{ fontSize: 14 }}>✍️</span> Manual
           </button>
         </div>
 
         {planMode === 'auto' && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>Reserve:</span>
-            <div style={{ display: 'flex', gap: 4 }}>
+            <div style={{ display: 'flex', gap: 5 }}>
               <button onClick={() => setBufferMode('exact')} style={miniTabStyle(bufferMode === 'exact')}>Exact</button>
               <button onClick={() => setBufferMode('buffered')} style={miniTabStyle(bufferMode === 'buffered')}>+15% Buffer</button>
             </div>
-            {/* >>> BAGO: paalala kung bakit maaaring magkaiba ang numero
-                dito laban sa Demand Forecast card, kapag "Exact" ang
-                pinili -- para hindi na muling isipin na "mali" ito. <<< */}
             {bufferMode === 'exact' && (
               <span style={{ fontSize: 9, color: 'var(--text3)', fontStyle: 'italic' }}>
                 (iba ito sa Demand Forecast — laging buffered ang doon)
@@ -544,26 +459,23 @@ export default function BarangayDistributionCard() {
           </div>
         )}
 
-        {/* >>> BAGO: Box/Strip/Pcs unit toggle, MANUAL mode lang. Naka-
-            disable ang Box/Strip kung ang kasalukuyang active na gamot ay
-            walang packaging conversion (walang pieces_per_box/strip). <<< */}
         {planMode === 'manual' && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>I-input bilang:</span>
-            <div style={{ display: 'flex', gap: 4 }}>
+            <div style={{ display: 'flex', gap: 5 }}>
               <button
                 onClick={() => setInputUnit('box')}
-                disabled={!activePkg?.piecesPerBox}
-                title={!activePkg?.piecesPerBox ? 'Walang box packaging info ang gamot na ito' : undefined}
-                style={miniTabStyle(inputUnit === 'box', !activePkg?.piecesPerBox)}
+                disabled={!activePkg?.piecesPerBox || activeIsDrops}
+                title={activeIsDrops ? 'Drops -- pcs (bote) lang ang input dito' : !activePkg?.piecesPerBox ? 'Walang box packaging info ang gamot na ito' : undefined}
+                style={miniTabStyle(inputUnit === 'box', !activePkg?.piecesPerBox || activeIsDrops)}
               >
                 Box
               </button>
               <button
                 onClick={() => setInputUnit('strip')}
-                disabled={!activePkg?.piecesPerStrip}
-                title={!activePkg?.piecesPerStrip ? 'Walang strip packaging info ang gamot na ito' : undefined}
-                style={miniTabStyle(inputUnit === 'strip', !activePkg?.piecesPerStrip)}
+                disabled={!activePkg?.piecesPerStrip || activeIsDrops}
+                title={activeIsDrops ? 'Drops -- pcs (bote) lang ang input dito' : !activePkg?.piecesPerStrip ? 'Walang strip packaging info ang gamot na ito' : undefined}
+                style={miniTabStyle(inputUnit === 'strip', !activePkg?.piecesPerStrip || activeIsDrops)}
               >
                 Strip
               </button>
@@ -572,8 +484,11 @@ export default function BarangayDistributionCard() {
               </button>
             </div>
             {inputUnit !== 'pcs' && activeMultiplier > 0 && (
-              <span style={{ fontSize: 9.5, color: 'var(--text3)' }}>
-                (1 {inputUnit} = {activeMultiplier} pcs)
+              <span style={{ fontSize: 9, color: 'var(--text3)' }}>(1 {inputUnit} = {activeMultiplier} pcs)</span>
+            )}
+            {activeIsDrops && (
+              <span style={{ fontSize: 9, color: 'var(--text3)', fontStyle: 'italic' }}>
+                💧 Drops -- pcs (bilang ng bote) lang
               </span>
             )}
           </div>
@@ -582,11 +497,11 @@ export default function BarangayDistributionCard() {
         {planMode === 'auto' && autoGroups.length === 0 ? (
           <div style={emptyStyle}>Walang matitirang stock na maipapamahagi sa mga barangay ngayon.</div>
         ) : (
-          <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: 10 }}>
-            {/* Kaliwa: "1. Pumili ng gamot" */}
-            <div style={{ width: '38%', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 0 }}>
-              <div style={stepLabelStyle}>1 · Piliin ang gamot</div>
-              <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 5, overflowY: 'auto', marginTop: 5 }}>
+          <div style={{ flex: 1, minHeight: 340, display: 'flex', gap: 16 }}>
+            {/* Kaliwa: pumili ng gamot */}
+            <div style={{ width: '40%', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+              <StepLabel n={1} text="Piliin ang gamot" />
+              <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto', marginTop: 10 }}>
                 {(planMode === 'auto' ? autoGroups.map(g => g.medicine_name) : allMedicineNames).map(medName => {
                   const isActive = medName === activeMed
                   const autoG = autoGroups.find(g => g.medicine_name === medName)
@@ -600,17 +515,17 @@ export default function BarangayDistributionCard() {
                       onClick={() => { setActiveMed(medName); setQuery('') }}
                       style={{
                         textAlign: 'left',
-                        padding: '8px 10px',
-                        borderRadius: 8,
+                        padding: '12px 14px',
+                        borderRadius: 12,
                         border: '1px solid var(--border)',
-                        borderLeft: isActive ? '3px solid #16a34a' : '3px solid transparent',
+                        borderLeft: isActive ? '4px solid #16a34a' : '4px solid transparent',
                         background: isActive ? 'var(--surface2)' : 'transparent',
                         cursor: 'pointer',
                         flexShrink: 0,
                         transition: 'background .12s ease, border-color .12s ease',
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                         <span style={{
                           fontSize: 11.5, fontWeight: 700,
                           color: isActive ? '#0f5132' : 'var(--text)',
@@ -619,21 +534,18 @@ export default function BarangayDistributionCard() {
                           {medName}
                         </span>
                         {planMode === 'manual' && (
-                          <span style={{ fontSize: 11, flexShrink: 0 }}>{isComplete ? '✅' : mStats && mStats.filled > 0 ? '🟡' : '⚪'}</span>
+                          <span style={{ fontSize: 11.5, flexShrink: 0 }}>{isComplete ? '✅' : mStats && mStats.filled > 0 ? '🟡' : '⚪'}</span>
                         )}
                       </div>
 
+                      {dosageFormByMed.get(medName) && (
+                        <span style={dosageFormBadgeStyle}>
+                          {formIcon(dosageFormByMed.get(medName))} {dosageFormByMed.get(medName)}
+                        </span>
+                      )}
+
                       {planMode === 'auto' ? (
-                        <div style={{ fontSize: 11, color: '#16a34a', fontWeight: 700, marginTop: 2 }}>
-                          {/* >>> BAGO: pinasimple base sa hiling -- pangalan
-                              ng gamot na lang (nasa itaas) + total na
-                              AVAILABLE STOCK PARA SA BARANGAY DISTRIBUTION
-                              (kasama ang leftover, hindi lang ang
-                              per-barangay na bahagi), naka-Box/Strip/Pcs
-                              format. Tinanggal ang "× 96 brgy", leftover
-                              note, at "Kabuuang stock" na hiwalay -- lahat
-                              na iyon ay puwede pa ring makita sa kanang
-                              panel (per-barangay recommendation list). <<< */}
+                        <div style={{ fontSize: 11, color: '#16a34a', fontWeight: 700, marginTop: 4 }}>
                           {autoG ? (
                             formatTotalAvailableBreakdown(
                               autoG.totalUnits + (leftoverByMed.get(medName) || 0),
@@ -644,11 +556,11 @@ export default function BarangayDistributionCard() {
                         </div>
                       ) : (
                         <>
-                          <div style={{ fontSize: 9.5, color: 'var(--text3)', marginTop: 2, display: 'flex', justifyContent: 'space-between' }}>
+                          <div style={{ fontSize: 9, color: 'var(--text3)', marginTop: 4, display: 'flex', justifyContent: 'space-between' }}>
                             <span>{mStats!.filled}/{totalBarangays} brgy</span>
                             {mStats!.total > 0 && <span style={{ color: '#16a34a', fontWeight: 700 }}>{mStats!.total} pcs</span>}
                           </div>
-                          <div style={{ height: 3, borderRadius: 999, background: 'var(--border)', marginTop: 4, overflow: 'hidden' }}>
+                          <div style={{ height: 4, borderRadius: 999, background: 'var(--border)', marginTop: 6, overflow: 'hidden' }}>
                             <div style={{ height: '100%', width: `${progressPct}%`, background: '#16a34a', borderRadius: 999, transition: 'width .15s ease' }} />
                           </div>
                         </>
@@ -659,20 +571,25 @@ export default function BarangayDistributionCard() {
               </div>
             </div>
 
-            {/* Kanan: "2. Ilagay ang dami" */}
-            <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 0 }}>
+            {/* Kanan: ilagay ang dami */}
+            <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
               {activeMed && (
                 <>
-                  <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-                    <div style={stepLabelStyle}>2 · {planMode === 'auto' ? 'Tingnan ang recommendation' : 'Ilagay ang dami bawat barangay'}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                      <StepLabel n={2} text={planMode === 'auto' ? 'Tingnan ang recommendation' : 'Ilagay ang dami bawat barangay'} />
+                      {activeDosageForm && (
+                        <span style={dosageFormBadgeStyle}>{formIcon(activeDosageForm)} {activeDosageForm}</span>
+                      )}
+                    </div>
                     {planMode === 'manual' && (
-                      <span style={{ fontSize: 10, fontWeight: 700, color: activeManualStats.filled > 0 ? '#16a34a' : 'var(--text3)' }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: activeManualStats.filled > 0 ? '#16a34a' : 'var(--text3)', flexShrink: 0 }}>
                         {activeManualStats.filled}/{totalBarangays}
                       </span>
                     )}
                   </div>
 
-                  <div style={{ display: 'flex', gap: 6, marginTop: 6, flexShrink: 0 }}>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10, flexShrink: 0 }}>
                     <input
                       value={query}
                       onChange={e => setQuery(e.target.value)}
@@ -685,10 +602,10 @@ export default function BarangayDistributionCard() {
                           value={fillAllValue}
                           onChange={e => setFillAllValue(e.target.value.replace(/[^0-9]/g, ''))}
                           placeholder={inputUnit === 'pcs' ? 'Qty' : `Qty (${inputUnit})`}
-                          style={{ ...inputStyle, width: 64, textAlign: 'center' }}
+                          style={{ ...inputStyle, width: 78, textAlign: 'center' }}
                         />
                         <button onClick={fillAllForActiveMed} style={fillAllButtonStyle} title="Ilagay ang quantity na ito sa LAHAT ng barangay">
-                          Fill All
+                          Fill all
                         </button>
                         <button onClick={clearActiveMed} style={clearButtonStyle} title="Burahin lahat ng nilagay para sa gamot na ito">
                           ✕
@@ -697,7 +614,7 @@ export default function BarangayDistributionCard() {
                     )}
                   </div>
 
-                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 3, marginTop: 6 }}>
+                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 5, marginTop: 10 }}>
                     {planMode === 'auto' ? (
                       filteredAutoRows.length === 0 ? (
                         <div style={rowEmptyStyle}>Walang barangay na matitira para sa gamot na ito.</div>
@@ -705,13 +622,8 @@ export default function BarangayDistributionCard() {
                         filteredAutoRows.map(r => (
                           <div key={r.destination_id} style={rowStyle}>
                             <span style={rowLabelStyle}>{r.barangay_name}</span>
-                            <span style={{ fontWeight: 700, color: '#16a34a', flexShrink: 0, marginLeft: 6, fontVariantNumeric: 'tabular-nums', textAlign: 'right' }}>
-                              {formatPackagingBreakdown(
-                                r.recommended_boxes,
-                                r.recommended_strips,
-                                r.recommended_pieces,
-                                r.recommended_quantity
-                              )}
+                            <span style={{ fontWeight: 700, color: '#16a34a', flexShrink: 0, marginLeft: 8, fontVariantNumeric: 'tabular-nums', textAlign: 'right' }}>
+                              {formatPackagingBreakdown(r.recommended_boxes, r.recommended_strips, r.recommended_pieces, r.recommended_quantity)}
                             </span>
                           </div>
                         ))
@@ -722,29 +634,19 @@ export default function BarangayDistributionCard() {
                       filteredBarangayList.map(b => {
                         const storedPieces = manualPlan[activeMed]?.[b.destination_id] ?? 0
                         const multiplier = activeMultiplier || 1
-                        // >>> BAGO: ang laman ng input ay laging naka-store
-                        // sa PIECES sa likod (manualPlan) -- dito lang ito
-                        // na-convert papunta sa kasalukuyang inputUnit para
-                        // ipakita. Kung may natitirang piraso na hindi
-                        // eksaktong mahati (hal. lumipat ng unit habang may
-                        // laman na), ipinapakita ang buong "= X pcs" sa
-                        // tabi para malinaw pa rin ang totoong halaga. <<<
                         const displayValue = multiplier > 0 ? storedPieces / multiplier : storedPieces
                         const hasVal = storedPieces > 0
                         return (
-                          <div
-                            key={b.destination_id}
-                            style={{ ...rowStyle, background: hasVal ? '#dcfce7' : 'var(--surface2)' }}
-                          >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
-                              <span style={{ fontSize: 10, flexShrink: 0, width: 12, textAlign: 'center' }}>{hasVal ? '✓' : ''}</span>
+                          <div key={b.destination_id} style={{ ...rowStyle, background: hasVal ? '#dcfce7' : 'var(--surface2)' }}>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 7, minWidth: 0, flex: 1 }}>
+                              <span style={{ fontSize: 9.5, flexShrink: 0, width: 14, textAlign: 'center' }}>{hasVal ? '✓' : ''}</span>
                               <span style={{ ...rowLabelStyle, color: hasVal ? '#0f5132' : 'var(--text2)', fontWeight: hasVal ? 600 : 400 }}>
                                 {b.barangay_name}
                               </span>
                             </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 6 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 }}>
                               {inputUnit !== 'pcs' && hasVal && !Number.isInteger(displayValue) && (
-                                <span style={{ fontSize: 8.5, color: 'var(--text3)' }}>({storedPieces} pcs)</span>
+                                <span style={{ fontSize: 9, color: 'var(--text3)' }}>({storedPieces} pcs)</span>
                               )}
                               <input
                                 type="number"
@@ -759,7 +661,7 @@ export default function BarangayDistributionCard() {
                                   fontWeight: hasVal ? 700 : 400,
                                 }}
                               />
-                              <span style={{ fontSize: 9.5, color: 'var(--text3)' }}>{inputUnit}</span>
+                              <span style={{ fontSize: 9, color: 'var(--text3)' }}>{inputUnit}</span>
                             </div>
                           </div>
                         )
@@ -773,10 +675,20 @@ export default function BarangayDistributionCard() {
         )}
 
         {/* Confirm & Save */}
-        <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div
+          style={{
+            flexShrink: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            padding: '14px 0 2px',
+            borderTop: '1px solid var(--border)',
+            background: 'var(--surface, #fff)',
+          }}
+        >
           {saveMsg && (
             <div style={{
-              fontSize: 10.5, padding: '5px 8px', borderRadius: 6,
+              fontSize: 10, padding: '8px 12px', borderRadius: 9,
               background: saveMsg.type === 'ok' ? '#dcfce7' : '#fee2e2',
               color: saveMsg.type === 'ok' ? '#16a34a' : '#dc2626',
               wordBreak: 'break-word',
@@ -784,33 +696,52 @@ export default function BarangayDistributionCard() {
               {saveMsg.type === 'ok' ? '✓ ' : '⚠ '}{saveMsg.text}
             </div>
           )}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
             <button
               onClick={handleConfirmSave}
               disabled={saving}
               style={{
-                flex: 1, fontSize: 11.5, fontWeight: 700, padding: '9px 12px', borderRadius: 8,
+                flex: 1, fontSize: 11.5, fontWeight: 700, padding: '13px 16px', borderRadius: 11,
                 border: 'none', color: '#fff', cursor: saving ? 'default' : 'pointer',
                 background: 'linear-gradient(135deg,#0f5132,#16a34a)', opacity: saving ? 0.6 : 1,
-                boxShadow: '0 2px 6px rgba(22,163,74,0.25)',
+                boxShadow: '0 3px 10px rgba(22,163,74,0.28)',
               }}
             >
-              {saving ? 'Saving…' : `Confirm & Save (${planMode === 'auto' ? 'Auto' : 'Manual'})`}
+              {saving ? 'Saving…' : `Confirm & save (${planMode === 'auto' ? 'Auto' : 'Manual'})`}
             </button>
             {lastComputed && (
-              <div style={{ fontSize: 10, color: 'var(--text3)', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
-                <button
-                  onClick={fetchPrediction}
-                  disabled={refreshing}
-                  style={{ background: 'none', border: 'none', color: 'var(--green, #16a34a)', fontWeight: 700, cursor: refreshing ? 'default' : 'pointer', fontSize: 10, padding: 0, opacity: refreshing ? 0.6 : 1 }}
-                >
-                  {refreshing ? 'Refreshing…' : 'Refresh'}
-                </button>
-              </div>
+              <button
+                onClick={fetchPrediction}
+                disabled={refreshing}
+                style={refreshButtonStyle(refreshing)}
+              >
+                <span style={refreshing ? { ...spinIconStyle, animation: 'brgySpin .8s linear infinite' } : spinIconStyle}>⟳</span>
+                {refreshing ? 'Refreshing' : 'Refresh'}
+              </button>
             )}
           </div>
         </div>
       </div>
+
+      <style>{`@keyframes brgySpin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }`}</style>
+    </div>
+  )
+}
+
+function HeaderTitle() {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <span style={headerIconBadgeStyle}>🗺️</span>
+      <span style={headerTitleTextStyle}>Barangay distribution</span>
+    </div>
+  )
+}
+
+function StepLabel({ n, text }: { n: number; text: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <span style={stepBadgeStyle}>{n}</span>
+      <span style={stepTextStyle}>{text}</span>
     </div>
   )
 }
@@ -824,12 +755,13 @@ function modeButtonStyle(active: boolean): React.CSSProperties {
     gap: 6,
     fontSize: 12,
     fontWeight: 700,
-    borderRadius: 8,
-    padding: '8px 10px',
+    borderRadius: 9,
+    padding: '8px 12px',
     border: '1px solid ' + (active ? 'transparent' : 'var(--border)'),
     background: active ? 'linear-gradient(135deg,#0f5132,#16a34a)' : 'var(--surface2)',
     color: active ? '#fff' : 'var(--text3)',
     cursor: 'pointer',
+    boxShadow: active ? '0 2px 6px rgba(22,163,74,.25)' : 'none',
     transition: 'background .15s ease, color .15s ease',
   }
 }
@@ -838,8 +770,8 @@ function miniTabStyle(active: boolean, disabled?: boolean): React.CSSProperties 
   return {
     fontSize: 10,
     fontWeight: 700,
-    borderRadius: 6,
-    padding: '3px 8px',
+    borderRadius: 8,
+    padding: '6px 12px',
     border: '1px solid ' + (active ? '#16a34a' : 'var(--border)'),
     background: active ? '#dcfce7' : 'transparent',
     color: disabled ? 'var(--border)' : active ? '#16a34a' : 'var(--text3)',
@@ -848,79 +780,162 @@ function miniTabStyle(active: boolean, disabled?: boolean): React.CSSProperties 
   }
 }
 
-const stepLabelStyle: React.CSSProperties = {
-  fontSize: 9.5, fontWeight: 800, color: 'var(--text3)', letterSpacing: '.04em', textTransform: 'uppercase',
+function refreshButtonStyle(refreshing: boolean): React.CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: 10.5,
+    fontWeight: 700,
+    color: '#16a34a',
+    background: '#f0fdf4',
+    border: '1px solid #bbf7d0',
+    borderRadius: 999,
+    padding: '9px 16px',
+    cursor: refreshing ? 'default' : 'pointer',
+    opacity: refreshing ? 0.75 : 1,
+    flexShrink: 0,
+  }
+}
+
+function headerChipStyle(solid: boolean): React.CSSProperties {
+  return {
+    fontSize: 10,
+    color: '#fff',
+    fontWeight: 700,
+    background: solid ? 'rgba(255,255,255,.2)' : 'transparent',
+    border: solid ? 'none' : '1px solid rgba(255,255,255,.5)',
+    padding: '5px 12px',
+    borderRadius: 999,
+  }
+}
+
+const stepBadgeStyle: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: 20,
+  height: 20,
+  borderRadius: 6,
+  fontSize: 9,
+  fontWeight: 800,
+  flexShrink: 0,
+  background: 'linear-gradient(135deg,#16a34a,#22c55e)',
+  color: '#fff',
+}
+const stepTextStyle: React.CSSProperties = {
+  fontSize: 11, fontWeight: 700, color: 'var(--text2)',
+}
+
+// >>> BAGO: badge para sa dosage_form (Tablet/Capsule/Suspension/
+// Drops/atbp.) sa medicine list.
+const dosageFormBadgeStyle: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
+  fontSize: 9.5,
+  fontWeight: 600,
+  color: 'var(--text3)',
+  background: 'var(--surface2)',
+  border: '1px solid var(--border)',
+  padding: '2px 8px',
+  borderRadius: 999,
+  marginTop: 5,
 }
 
 const inputStyle: React.CSSProperties = {
-  fontSize: 11, padding: '6px 8px', borderRadius: 6,
+  fontSize: 11, padding: '9px 12px', borderRadius: 9,
   border: '1px solid var(--border)', background: 'var(--surface2)',
   color: 'var(--text)', outline: 'none',
 }
 
 const fillAllButtonStyle: React.CSSProperties = {
-  fontSize: 10.5, fontWeight: 700, padding: '6px 10px', borderRadius: 6,
+  fontSize: 10, fontWeight: 700, padding: '8px 13px', borderRadius: 9,
   border: '1px solid #16a34a', background: '#dcfce7', color: '#16a34a',
   cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
 }
 
 const clearButtonStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 700, padding: '6px 9px', borderRadius: 6,
+  fontSize: 10.5, fontWeight: 700, padding: '8px 12px', borderRadius: 9,
   border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)',
   cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
 }
 
 const rowStyle: React.CSSProperties = {
-  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-  fontSize: 11, padding: '5px 8px', borderRadius: 6, background: 'var(--surface2)',
+  display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8,
+  fontSize: 10.5, padding: '8px 12px', borderRadius: 9, background: 'var(--surface2)',
   transition: 'background .12s ease',
 }
 
 const rowLabelStyle: React.CSSProperties = {
-  color: 'var(--text2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  color: 'var(--text2)', flex: 1, minWidth: 0, wordBreak: 'break-word',
 }
 
 const rowEmptyStyle: React.CSSProperties = {
-  fontSize: 10.5, color: 'var(--text3)', padding: '6px 0', textAlign: 'center',
+  fontSize: 10, color: 'var(--text3)', padding: '10px 0', textAlign: 'center',
 }
 
 const qtyInputStyle: React.CSSProperties = {
-  width: 44, fontSize: 11, padding: '3px 6px', borderRadius: 5,
+  width: 56, fontSize: 10.5, padding: '5px 8px', borderRadius: 7,
   border: '1.5px solid var(--border)', background: 'var(--surface)',
   outline: 'none', textAlign: 'right', flexShrink: 0, fontVariantNumeric: 'tabular-nums',
 }
 
-// ---- Shared inline styles (mirrors PredictionCard / MedicineMovementAnalytics) ----
+const retryButtonStyle: React.CSSProperties = {
+  background: 'none',
+  color: '#dc2626',
+  border: '1px solid rgba(220,38,38,.35)',
+  borderRadius: 999,
+  padding: '5px 14px',
+  fontSize: 10.5,
+  fontWeight: 700,
+  cursor: 'pointer',
+  flexShrink: 0,
+}
+
+const spinIconStyle: React.CSSProperties = { display: 'inline-block' }
+
+// ---- Shared inline styles (mirrors PredictionCard) ----
 const cardStyle: React.CSSProperties = {
   background: 'var(--surface, #fff)',
   border: '1px solid var(--border)',
-  borderRadius: 12,
-  overflow: 'hidden',
+  borderRadius: 18,
+  overflowY: 'auto',
+  overflowX: 'hidden',
+  boxShadow: '0 6px 28px rgba(13,59,31,0.12)',
 }
 const headerStyle: React.CSSProperties = {
   background: 'linear-gradient(135deg,#0f5132,#16a34a)',
-  padding: '13px 16px',
+  padding: '15px 20px',
   display: 'flex',
   justifyContent: 'space-between',
   alignItems: 'center',
   flexWrap: 'wrap',
-  rowGap: 4,
+  rowGap: 8,
+  position: 'sticky',
+  top: 0,
+  zIndex: 2,
 }
-const headerTitleStyle: React.CSSProperties = {
-  fontSize: 13,
+const headerIconBadgeStyle: React.CSSProperties = {
+  width: 32,
+  height: 32,
+  borderRadius: 11,
+  background: 'rgba(255,255,255,.18)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  fontSize: 15,
+  flexShrink: 0,
+}
+const headerTitleTextStyle: React.CSSProperties = {
+  fontSize: 14,
   fontWeight: 800,
   color: '#fff',
-  letterSpacing: '.03em',
-}
-const headerMetaStyle: React.CSSProperties = {
-  fontSize: 10.5,
-  color: 'rgba(255,255,255,.85)',
-  fontWeight: 600,
 }
 const emptyStyle: React.CSSProperties = {
-  fontSize: 12,
+  fontSize: 11.5,
   color: 'var(--text3)',
-  padding: '8px 0',
+  padding: '10px 0',
   flex: 1,
   display: 'flex',
   alignItems: 'center',

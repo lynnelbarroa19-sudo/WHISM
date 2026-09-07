@@ -11,8 +11,15 @@ export interface Medicine {
   dosage_strength: string | null
   dosage_form: string | null
   category: 'drug' | 'supply'
+  // Clinical classification (Analgesics, Antibiotics, etc.) — only ever set
+  // for category === 'drug'; always null for supplies. Matches the DB's
+  // `medicines_drug_category_check` CHECK constraint.
+  drug_category: string | null
   unit: string | null
   manufacturer: string | null
+  // Date the item was manufactured — separate from `date_received` (when the
+  // batch arrived at this facility).
+  manufacture_date: string | null
   source: 'DOH' | 'PhilHealth' | 'LGU' | null
   batch_number: string | null
   expiration_date: string | null
@@ -48,8 +55,42 @@ export type ImportRow = {
   category: 'drug' | 'supply'
 }
 
-export const DRUG_TYPES   = ['Tablet','Capsule','Syrup','Vaccine','Injection','Ointment','Suspension','Drops']
+// Type list for Medical Drugs. Grouped by how AddMedicineModal packages
+// stock for each (see packagingMode in AddMedicineModal.tsx):
+//   - Tablet, Capsule: Boxes + Strips/Box + Pcs/Strip
+//   - Syrup, Suspension, Ointment, Drops, Bottle, Tube, Pre-filled Syringe:
+//     single Quantity field (no real "box" concept)
+//   - Vaccine, Injection, Vial, Ampules, Carpules, Nebules: Boxes + Pcs/Box
+//     (usually arrive boxed, but never have a "strip" in between)
+export const DRUG_TYPES = [
+  'Tablet', 'Capsule',
+  'Syrup', 'Suspension', 'Ointment', 'Drops', 'Bottle', 'Tube', 'Pre-filled Syringe',
+  'Vaccine', 'Injection', 'Vial', 'Ampules', 'Carpules', 'Nebules',
+]
 export const SUPPLY_TYPES = ['Lab Supply','Medical Form','Medical Tape','Insecticide','PPE','Syringe','Other']
+
+// ─── Packaging classification (drives both AddMedicineModal's form layout
+// and the inventory table's Boxes/Strip display) ─────────────────────────
+// 'quantity': bottles/tubes/syringes/liquids — no real "box" in real life,
+// only a Pieces (Qty) count makes sense; Boxes/Strip should be hidden.
+export const QUANTITY_ONLY_TYPES = [
+  'Drops', 'Syrup', 'Suspension', 'Ointment', 'Vaccine', 'Injection',
+  'Bottle', 'Tube', 'Pre-filled Syringe',
+]
+// 'box': vials/ampules/carpules/nebules (and Medical Supplies) — these DO
+// usually arrive boxed, but never have a "strip" in between.
+export const BOX_NO_STRIP_TYPES = [
+  'Vial', 'Ampules', 'Carpules', 'Nebules',
+]
+// Given a Type string and whether the item is a supply, returns which
+// packaging layout applies.
+export const packagingModeFor = (dosageForm: string | null | undefined, isSupply: boolean): 'quantity' | 'box' | 'strip' => {
+  if (isSupply) return 'box'
+  const t = (dosageForm || '').trim().toLowerCase()
+  if (QUANTITY_ONLY_TYPES.some(x => x.toLowerCase() === t)) return 'quantity'
+  if (BOX_NO_STRIP_TYPES.some(x => x.toLowerCase() === t)) return 'box'
+  return 'strip'
+}
 
 // The 3 fixed stock sources this system tracks. These map 1:1 to the
 // `medicines_source_check` CHECK constraint values in Supabase — do NOT

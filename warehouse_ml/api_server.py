@@ -1,5 +1,5 @@
 """
-api_server.py  (v5.4 - + removed auto-logging from /predict-distribution)
+api_server.py  (v5.5 - + dosage_form now included in stock_and_reserve_summary)
 --------------------------------------------------------------------------
 Ito ang ML mula sa PANIG NG WAREHOUSE. Ang sagot dito:
 
@@ -13,6 +13,25 @@ Ito ang ML mula sa PANIG NG WAREHOUSE. Ang sagot dito:
 
   3. "Ang MATITIRA pagkatapos ng reserve -- ilan ang pwede kong ipamigay
      sa 96 BARANGAY, PANTAY-PANTAY bawat isa?"
+
+CHANGES IN v5.5 (dosage_form ngayon kasama na sa stock_and_reserve_summary):
+  Dating hindi kasama ang `dosage_form` (Tablet/Capsule/Suspension/
+  Drops/atbp., mula sa `medicines.dosage_form`) sa SELECT ng
+  fetch_medicine_catalog(), kaya lagi itong `null` sa response ng
+  /predict-distribution kahit may laman naman ang column sa Supabase
+  (PredictionCard.tsx sa frontend ay laging nagpapakita ng
+  "Not specified" dahil dito). Ngayon:
+    1. Idinagdag ang "dosage_form" sa .select() ni
+       fetch_medicine_catalog(), at kasama na rin ito sa dict na
+       ibinabalik nito per medicine.
+    2. Ginawa ang `dosage_form_by_med` mapping (kaparehong pattern ng
+       `unit_by_med`), at idinagdag ang "dosage_form" key sa dict na
+       ini-append sa `result_per_medicine` sa loob ng
+       predict_distribution().
+  Kung talagang NULL ang dosage_form ng isang gamot sa mismong
+  Supabase (walang na-type na value), magpapatuloy pa rin itong
+  lalabas bilang `null` sa JSON -- tama at inaasahan iyon, ang
+  frontend na lang ang nagpapakita ng "Not specified" bilang fallback.
 
 CHANGES IN v5.4 (tinanggal ang auto-logging sa /predict-distribution):
   Dating gumagawa ang predict_distribution() ng BAGONG "draft" na
@@ -75,6 +94,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict, Optional, List
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import joblib
 import os
@@ -98,7 +118,7 @@ from barangay_distribution import (
 
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-app = FastAPI(title="WHIMS RHU - Warehouse ML Service v5.4 (no auto-logging on predict, DEBUG mode)")
+app = FastAPI(title="WHIMS RHU - Warehouse ML Service v5.5 (dosage_form fix, DEBUG mode)")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -199,6 +219,31 @@ _cache = None
 # parehong araw ay gagamit na lang ng cached na resulta. <<<
 _seasonal_cache = {"date": None, "demand_by_season": None}
 
+# >>> BAGO (bilis): cache PARA SA "DEMAND" forecast (yung 30-araw, o
+# kung anong forecast_days_ahead ang ipinasa) -- GAYA RIN NG GINAWA
+# NATIN SA SEASONAL sa itaas. Ang build_pharmacy_request_forecast()
+# ay UMAASA LANG sa na-train na model + latest_features.csv -- WALANG
+# kinalaman dito ang current_stock o pending_committed_requests (mga
+# 'yon ay hiwalay na dinadagdag PAGKATAPOS, sa loob ng predict_
+# distribution()). Ibig sabihin, hindi ito nagbabago sa loob ng iisang
+# araw maliban kung mag-retrain (na nagre-reset na ng cache na ito,
+# tingnan ang /retrain sa ibaba) -- kaya ligtas at TAMANG i-cache ito
+# nang isang beses bawat araw, sa halip na kompyutin ulit ang
+# BUONG batched ML prediction loop sa BAWAT SINGLE page load/refresh
+# ng DALAWANG card (Demand Forecast + Barangay Distribution). Keyed by
+# forecast_days_ahead dahil pwedeng iba-iba ang hiniling na horizon
+# (bagama't 30 ang default/palaging ginagamit ng frontend ngayon). <<<
+_demand_forecast_cache: Dict[int, Dict] = {}
+
+def get_cached_events_df(forecast_days_ahead: int):
+    today_str = pd.Timestamp.today().strftime("%Y-%m-%d")
+    cached = _demand_forecast_cache.get(forecast_days_ahead)
+    if cached and cached["date"] == today_str:
+        return cached["events_df"]
+    events_df = build_pharmacy_request_forecast(forecast_days_ahead)
+    _demand_forecast_cache[forecast_days_ahead] = {"date": today_str, "events_df": events_df}
+    return events_df
+
 def get_models():
     global _cache
     if _cache is None:
@@ -243,21 +288,29 @@ def fetch_barangay_count_from_destinations() -> int:
 
 def fetch_medicine_catalog() -> Dict[str, Dict[str, str]]:
     """
-    Kunin ang TOTOONG unit AT category ng bawat gamot mula sa 'medicines'
-    table (hal. unit: "Piece", "Bottle", "Box", "Loose", "Strip") -- ito
-    ang ipapalit sa dating generic na "u" sa Demand Forecast at Barangay
-    Distribution cards, para tumugma sa TALAGANG nasa medicine
-    inventory, hindi basta paikot na label.
+    Kunin ang TOTOONG unit, category, AT dosage_form ng bawat gamot
+    mula sa 'medicines' table (hal. unit: "Piece", "Bottle", "Box",
+    "Loose", "Strip"; dosage_form: "Tablet", "Capsule", "Suspension",
+    "Drops", "Nebule", atbp.) -- ito ang ipapalit sa dating generic na
+    "u" sa Demand Forecast at Barangay Distribution cards, para tumugma
+    sa TALAGANG nasa medicine inventory, hindi basta paikot na label.
 
-    Ginagamit din ito para bigyan ng unit/category ang mga BAGONG gamot
-    na wala pang laman sa ML model (tingnan ang live-merge sa
-    /predict-distribution) -- kaya kasama rin ang LAHAT ng gamot dito,
-    hindi lang yung nasa training data.
+    >>> FIX v5.5: idinagdag ang "dosage_form" sa .select() -- dati
+    hindi ito kasama, kaya laging null/"Not specified" ang lumalabas
+    sa "Form:" na linya ng PredictionCard.tsx sa Reserve tab, kahit
+    may value naman talaga sa Supabase (tingnan ang dosage_form_by_med
+    mapping sa predict_distribution() sa ibaba kung paano ito
+    ginagamit). <<<
+
+    Ginagamit din ito para bigyan ng unit/category/dosage_form ang mga
+    BAGONG gamot na wala pang laman sa ML model (tingnan ang
+    live-merge sa /predict-distribution) -- kaya kasama rin ang LAHAT
+    ng gamot dito, hindi lang yung nasa training data.
     """
     sb = get_supabase()
     if sb is None:
         return {}
-    resp = sb.table("medicines").select("generic_name, unit, category").execute()
+    resp = sb.table("medicines").select("generic_name, unit, category, dosage_form").execute()
     if not resp.data:
         return {}
     catalog = {}
@@ -272,6 +325,11 @@ def fetch_medicine_catalog() -> Dict[str, Dict[str, str]]:
         catalog[row["generic_name"]] = {
             "unit": row.get("unit") or "unit",
             "category": cat,
+            # >>> BAGO v5.5: hindi na-normalize/altered dito, ipinasa
+            # nang buo -- kung NULL sa Supabase, mananatiling None
+            # (-> null sa JSON), tama at inaasahan iyon; ang frontend
+            # na lang ang may "Not specified" fallback. <<<
+            "dosage_form": row.get("dosage_form"),
         }
     return catalog
 
@@ -400,7 +458,7 @@ def build_pharmacy_request_forecast(forecast_days_ahead: int):
     >>> FIX (BAGAL sa mahabang forecast_days_ahead, hal. 400+ araw para
     sa Seasonal tab): DATING isa-isang `qty_model.predict()` call PER
     EVENT (bawat gamot, bawat susunod na petsa) -- kaya sa 400-araw na
-    horizon, umaabot ng DAAN-DAANG indibidwal na model.predict() calls,
+    horizon, umaabot ng daan-daang indibidwal na model.predict() calls,
     bawat isa may sariling overhead (paggawa ng bagong 1-row DataFrame,
     atbp.), kaya sobrang bagal, lalo na dahil TAWAG ITO NANG DALAWANG
     BESES bawat /predict-distribution (30-araw para sa Demand, +400-araw
@@ -488,36 +546,70 @@ def build_pharmacy_request_forecast(forecast_days_ahead: int):
 
 @app.post("/predict-distribution")
 def predict_distribution(req: PredictRequest):
-    current_stock = req.current_stock or fetch_current_stock_from_supabase()
+    # Siguraduhing GAWA na ang _supabase client BAGO mag-fan-out sa
+    # threadpool sa ibaba -- iwas race kung dalawang thread ang parehong
+    # susubukang gawin ito nang sabay sa unang pagkakataon.
+    sb = get_supabase()
 
-    barangay_list = fetch_barangay_list_from_destinations(get_supabase())
+    # >>> BAGO (bilis): SUNOD-SUNOD dating tinatawag ang apat na fetch_*
+    # function sa ibaba -- kahit isa sa kanila ay walang dependency sa
+    # resulta ng iba (independienteng Supabase READS lahat). Kung
+    # ~200-300ms ang bawat network round-trip papuntang Supabase,
+    # ~1 segundo o higit pa ang TOTAL na naiipon dito bago pa man
+    # magsimula ang tunay na computation -- SUNOD-SUNOD kasi sila
+    # tinatawag. Ngayon, SABAY-SABAY (concurrent, gamit ang
+    # ThreadPoolExecutor) sila tinatawag -- ang TOTAL na oras ay
+    # magiging kasing bilis na lang ng PINAKABAGAL sa kanila, hindi na
+    # ang KABUUAN ng lahat. Ligtas na itong gawin ngayon dahil naka-
+    # force na HTTP/1.1 (http2=False) ang Supabase client mula pa sa
+    # v5.3 fix sa itaas -- hindi na ito naka-multiplex sa isang shared
+    # stream na sensitive sa concurrent thread access. <<<
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        stock_future = None if req.current_stock else pool.submit(fetch_current_stock_from_supabase)
+        barangay_future = pool.submit(fetch_barangay_list_from_destinations, sb)
+        pending_future = pool.submit(fetch_pending_committed_requests)
+        catalog_future = pool.submit(fetch_medicine_catalog)
+        packaging_future = pool.submit(fetch_medicine_packaging)
+
+        current_stock = req.current_stock or stock_future.result()
+        barangay_list = barangay_future.result()
+        pending_committed = pending_future.result()
+        medicine_catalog = catalog_future.result()
+        packaging_by_med = packaging_future.result()
+
+    # Bihirang mangyari lang ito (kapag literal walang laman ang
+    # 'destinations' table) -- kaya sequential fallback na lang, hindi
+    # na kasama sa itaas dahil umaasa ito sa resulta ng barangay_list.
     num_brgy_final = req.number_of_barangays or len(barangay_list) or fetch_barangay_count_from_destinations()
 
-    pending_committed = fetch_pending_committed_requests()
-
-    medicine_catalog = fetch_medicine_catalog()
     unit_by_med = {name: info["unit"] for name, info in medicine_catalog.items()}
+    # >>> BAGO v5.5: dosage_form mapping, kaparehong pattern ng
+    # unit_by_med sa itaas -- ginagamit sa loob ng loop bawat gamot
+    # para idagdag sa result_per_medicine (tingnan sa ibaba). <<<
+    dosage_form_by_med = {name: info.get("dosage_form") for name, info in medicine_catalog.items()}
 
-    packaging_by_med = fetch_medicine_packaging()
-
-    events_df = build_pharmacy_request_forecast(req.forecast_days_ahead)
+    # >>> BAGO (bilis): gamit na ang cached na events_df (tingnan ang
+    # get_cached_events_df() / _demand_forecast_cache sa itaas) sa
+    # halip na direktang tumawag sa build_pharmacy_request_forecast() --
+    # isang beses lang ito talaga kokomputin bawat araw, hindi na
+    # bawat page load/refresh ng dalawang card.
+    events_df = get_cached_events_df(req.forecast_days_ahead)
 
     if events_df.empty:
         raise HTTPException(400, "Walang na-generate na forecast. I-check ang latest_features.csv.")
 
-    predicted_requests = events_df.sort_values("predicted_request_date").to_dict(orient="records")
-
-    weekly = (
-        events_df.groupby(["year", "week_of_year", "medicine_name", "medicine_category"])
-        ["predicted_quantity_requested"].sum().reset_index()
-        .rename(columns={"predicted_quantity_requested": "predicted_qty_this_week"})
-    )
-
-    monthly = (
-        events_df.groupby(["year", "month", "medicine_name", "medicine_category"])
-        ["predicted_quantity_requested"].sum().reset_index()
-        .rename(columns={"predicted_quantity_requested": "predicted_qty_this_month"})
-    )
+    # >>> BAGO (bilis): TINANGGAL ang `predicted_requests` (per-event
+    # detail list), `weekly`, at `monthly` na computation dito -- na-
+    # verify na WALA sa PredictionCard.tsx o BarangayDistributionCard.tsx
+    # na gumagamit sa "predicted_pharmacy_requests_detail",
+    # "predicted_pharmacy_requests_weekly", o
+    # "predicted_pharmacy_requests_monthly" fields sa response (ang
+    # TS interfaces sa dalawang card ay hindi man lang nagde-declare
+    # ng mga field na 'to). Dagdag na groupby/loop computation at
+    # dagdag na laki ng JSON payload na walang kwenta kung walang
+    # gumagamit -- kung sakaling meron palang IBANG parte ng system
+    # na umaasa dito, tingnan na lang ang git history ng file na ito
+    # para sa dating code.
 
     total_demand = (
         events_df.groupby(["medicine_name", "medicine_category"])
@@ -617,6 +709,13 @@ def predict_distribution(req: PredictRequest):
             "stock_status": "⚠️ SHORTAGE - hindi sapat kahit para lang sa pharmacy" if stock < reserve_buffered else "✅ SUFFICIENT",
             "pieces_per_box": pkg.get("pieces_per_box"),
             "pieces_per_strip": pkg.get("pieces_per_strip"),
+            # >>> BAGO v5.5: dosage_form (Tablet/Capsule/Suspension/
+            # Drops/atbp.) -- kung walang match sa medicine_catalog
+            # (hal. mali ang spelling ng medicine_name kumpara sa
+            # medicines.generic_name), o kung NULL talaga sa Supabase,
+            # magiging None ito (-> null sa JSON), at ang frontend na
+            # ang magpapakita ng "Not specified" fallback. <<<
+            "dosage_form": dosage_form_by_med.get(med),
         })
 
         distribution_exact.append(attach_equal_split(
@@ -634,52 +733,16 @@ def predict_distribution(req: PredictRequest):
     barangay_recommendation_buffered = build_equal_barangay_recommendation(distribution_buffered, barangay_list)
 
     # ============================================================
-    # >>> BAGO: WEEKLY / MONTHLY / SEASONAL na FORECAST breakdown --
-    # ito ang hiniling na "seasonal, weekly, and monthly na forecast
-    # demand". Base ito sa PAREHONG events_df na ginamit na para sa
-    # total_demand sa itaas -- kino-compute lang natin ito sa TATLONG
-    # magkaibang paraan ng pag-group (linggo, buwan, at season).
-    # Para sa bawat period, kasama ang TOTAL predicted quantity, at
-    # ang TOP medicines para doon (para makabuluhan agad ang display,
-    # hindi lang isang malaking number).
-    # ============================================================
-
-    # ---------- WEEKLY ----------
-    weekly_totals = (
-        events_df.groupby(["year", "week_of_year"])["predicted_quantity_requested"]
-        .sum().reset_index().rename(columns={"predicted_quantity_requested": "total_qty"})
-        .sort_values(["year", "week_of_year"])
-    )
-    weekly_by_med = (
-        events_df.groupby(["year", "week_of_year", "medicine_name"])["predicted_quantity_requested"]
-        .sum().reset_index().rename(columns={"predicted_quantity_requested": "qty"})
-    )
-    demand_by_week = []
-    for _, wk in weekly_totals.iterrows():
-        yr, week = int(wk["year"]), int(wk["week_of_year"])
-        meds = weekly_by_med[(weekly_by_med["year"] == yr) & (weekly_by_med["week_of_year"] == week)]
-        # >>> BAGO: TANGGAL na ang head(5) limit -- ibinabalik na LAHAT
-        # ng gamot na may forecasted quantity para sa linggong ito
-        # (naka-sort pa rin pababa base sa dami). Ang frontend na lang
-        # ang bahalang mag-slice(0,5) para sa compact na inline view,
-        # at may "Ipakita lahat" na magbubukas ng buong listahan sa
-        # modal kung kailangan.
-        meds = meds.sort_values("qty", ascending=False)
-        try:
-            week_start = pd.Timestamp.fromisocalendar(yr, week, 1)  # Lunes ng linggong 'yon
-            week_label = week_start.strftime("Week of %b %d, %Y")
-        except Exception:
-            week_label = f"Week {week}, {yr}"
-        demand_by_week.append({
-            "year": yr,
-            "week_of_year": week,
-            "week_label": week_label,
-            "total_predicted_quantity": int(wk["total_qty"]),
-            "top_medicines": [
-                {"medicine_name": m["medicine_name"], "quantity": int(m["qty"])}
-                for _, m in meds.iterrows()
-            ],
-        })
+    # >>> BAGO: MONTHLY / SEASONAL na FORECAST breakdown. May
+    # ikatlong "WEEKLY" breakdown dati dito (parehong groupby logic,
+    # iisang events_df) pero TINANGGAL na -- tinanggal na rin ang
+    # Weekly tab sa PredictionCard.tsx (frontend) kaya hindi na ito
+    # ginagamit/ni-render ng dashboard. Sayang lang na compute time
+    # (dagdag na groupby + Python loop) at dagdag na JSON payload size
+    # kung ikokompyut pa rin natin ito -- kaya inalis narin dito para
+    # sabay bumilis ang response. Kung babalik man ang Weekly tab sa
+    # frontend balang araw, tingnan na lang ang git history ng file
+    # na ito para sa dating "---------- WEEKLY ----------" block. <<<
 
     # ---------- MONTHLY ----------
     monthly_totals = (
@@ -803,15 +866,12 @@ def predict_distribution(req: PredictRequest):
         "number_of_barangays": num_brgy,
         "safety_buffer_percent_used": req.safety_buffer_percent,
 
-        "predicted_pharmacy_requests_detail": predicted_requests,
-        "predicted_pharmacy_requests_weekly": weekly.sort_values(["year", "week_of_year"]).to_dict(orient="records"),
-        "predicted_pharmacy_requests_monthly": monthly.sort_values(["year", "month"]).to_dict(orient="records"),
-
         "pharmacy_demand_summary": demand_summary_live.to_dict(orient="records"),
         "stock_and_reserve_summary": result_per_medicine,
 
-        # >>> BAGO: weekly/monthly/seasonal forecast breakdown
-        "demand_by_week": demand_by_week,
+        # >>> BAGO: monthly/seasonal forecast breakdown (Weekly tab at
+        # ang mga unused na predicted_pharmacy_requests_* fields ay
+        # tinanggal na -- tingnan ang mga paalala sa itaas)
         "demand_by_month": demand_by_month,
         "demand_by_season": demand_by_season,
 
@@ -948,7 +1008,7 @@ def confirm_distribution(req: ConfirmDistributionRequest):
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "message": "Warehouse ML service v5.4 is running (DEBUG mode)."}
+    return {"status": "ok", "message": "Warehouse ML service v5.5 is running (DEBUG mode)."}
 
 
 RETRAIN_COOLDOWN_SECONDS = 60 * 60  # 1 oras
@@ -999,10 +1059,12 @@ def retrain_model(req: RetrainRequest = RetrainRequest()):
     duration = round(time.time() - start_time, 2)
 
     _cache = None
-    # >>> BAGO: i-reset din ang seasonal cache -- bagong model na,
-    # kaya kailangang i-compute ulit ang seasonal forecast (hindi na
-    # dapat gamitin ang lumang cached na resulta mula sa lumang model).
+    # >>> BAGO: i-reset din ang seasonal AT demand-forecast cache --
+    # bagong model na, kaya kailangang i-compute ulit ang PAREHONG
+    # forecast (hindi na dapat gamitin ang lumang cached na resulta
+    # mula sa lumang model).
     _seasonal_cache = {"date": None, "demand_by_season": None}
+    _demand_forecast_cache.clear()
     _last_retrain_time = now
 
     log_retrain_to_supabase(trigger_source, result=result, status="success",

@@ -12,7 +12,7 @@ import { Plus, Download, X, PackageSearch, Archive as ArchiveIcon, RotateCcw } f
 import {
   T,
   computeStatus, IconDrug, IconSupply, IconArchive, IconImport, IconSearch,
-  IconExcelFile, IconPdfFile,
+  IconExcelFile, IconPdfFile, packagingModeFor,
   type Medicine, type Tab, type ImportRow,
 } from '../components/SharedMedicine'
 
@@ -20,11 +20,15 @@ import {
 // identity fields flattened together. `batch_id` is now the true unique key
 // for a row (a medicine can have several batches), so selection/keys use it
 // instead of `medicine_id`. `strips_per_box` / `pieces_per_strip` are carried
-// along too — used only to derive the Strip (Qty) column below. ───────────
+// along too — used only to derive the Strip (Qty) column below. `drug_category`
+// and `manufacture_date` come from the parent `medicines` row (via the `...r.medicines`
+// spread in flattenBatchRow) and are surfaced here purely for the table/type. ───
 type MedicineRow = Medicine & {
   batch_id: string
   strips_per_box: number | null
   pieces_per_strip: number | null
+  drug_category: string | null
+  manufacture_date: string | null
 }
 
 // ─── Source filter type ────────────────────────────────────────────────────
@@ -170,10 +174,10 @@ export default function MedicineStockPage() {
 
   // Flattens a `medicine_batches` row (with its joined `medicines` row) into
   // the single object the table renders — identity fields (name, brand,
-  // dosage, category, manufacturer, is_archived...) come from `medicines`;
-  // stock fields (boxes, pieces, expiration, source, batch_number, status,
-  // total_quantity, storage_location, date_received, remarks...) come from
-  // the batch itself.
+  // dosage, category, drug_category, manufacture_date, manufacturer,
+  // is_archived...) come from `medicines`; stock fields (boxes, pieces,
+  // expiration, source, batch_number, status, total_quantity,
+  // storage_location, date_received, remarks...) come from the batch itself.
   const flattenBatchRow = (r: any): MedicineRow | null => {
     if (!r.medicines) return null // guard: shouldn't happen, FK is NOT NULL
     return {
@@ -377,7 +381,9 @@ export default function MedicineStockPage() {
       'Brand Name': m.brand_name || '',
       [activeTab === 'supply' ? 'Specification' : 'Dosage']: m.dosage_strength || '',
       'Type': m.dosage_form || '',
+      'Drug Category': m.drug_category || '',
       'Manufacturer': m.manufacturer || '',
+      'Manufacture Date': m.manufacture_date || '',
       'Source': m.source || '',
       'EXP Date': m.expiration_date || '',
       'Date Received': m.date_received || '',
@@ -389,29 +395,116 @@ export default function MedicineStockPage() {
     }))
   }
 
+  // ── Export: Excel — auto-fits every column width to its longest value
+  // (header or cell) so the sheet opens already readable, no manual
+  // resizing needed in Excel/WPS/Sheets. Widths are clamped between 10–40
+  // characters so a single long outlier (e.g. a long manufacturer name)
+  // doesn't blow out the whole sheet. ─────────────────────────────────────
   const handleExportExcel = () => {
     const data = getExportData()
+    if (!data.length) { showToastMsg('Nothing to export!'); return }
+
     const ws = XLSX.utils.json_to_sheet(data)
+
+    const headers = Object.keys(data[0])
+    const colWidths = headers.map(header => {
+      const maxLen = Math.max(
+        header.length,
+        ...data.map(row => String((row as any)[header] ?? '').length)
+      )
+      return { wch: Math.min(Math.max(maxLen + 2, 10), 40) }
+    })
+    ws['!cols'] = colWidths
+
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Medicine Stock')
     XLSX.writeFile(wb, 'medicine-stock.xlsx')
     setShowExport(false); showToastMsg('Exported as Excel!')
   }
+
+  // ── Export: PDF — landscape A4 with a letterhead-style header (org name,
+  // report title, generated date/item count) and a page footer, so the
+  // printed report reads as an official document rather than a raw table
+  // dump. Logo is a placeholder circle for now — swap in doc.addImage()
+  // with a real base64 logo once one is available. ───────────────────────
   const handleExportPDF = () => {
     const data = getExportData()
-    const doc = new jsPDF()
-    doc.text('Medicine Stock Report', 14, 15)
+    if (!data.length) { showToastMsg('Nothing to export!'); return }
+
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' })
+    const pageWidth = doc.internal.pageSize.getWidth()
+
+    // ── Header / Letterhead ──
+    doc.setFillColor(13, 59, 31) // dark green band
+    doc.rect(0, 0, pageWidth, 70, 'F')
+
+    // Logo placeholder (left side) — replace with:
+    // doc.addImage(logoBase64, 'PNG', 25, 15, 40, 40)
+    doc.setFillColor(255, 255, 255)
+    doc.circle(45, 35, 20, 'F')
+    doc.setTextColor(13, 59, 31)
+    doc.setFontSize(8)
+    doc.setFont('helvetica', 'bold')
+    doc.text('LOGO', 45, 38, { align: 'center' })
+
+    // Org name + report title
+    doc.setTextColor(255, 255, 255)
+    doc.setFontSize(15)
+    doc.setFont('helvetica', 'bold')
+    doc.text('BARANGAY HEALTH CENTER / RHU WAREHOUSE', 80, 28)
+    doc.setFontSize(10)
+    doc.setFont('helvetica', 'normal')
+    doc.text('Medicine & Supplies Stock Report', 80, 44)
+
+    // Generated date + total items (right-aligned)
+    doc.setFontSize(9)
+    const today = new Date().toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' })
+    doc.text(`Generated: ${today}`, pageWidth - 20, 28, { align: 'right' })
+    doc.text(`Total Items: ${data.length}`, pageWidth - 20, 42, { align: 'right' })
+
+    // ── Table ──
     autoTable(doc, {
-      startY: 22,
-      head: [Object.keys(data[0] || {})],
+      startY: 84,
+      head: [Object.keys(data[0])],
       body: data.map(d => Object.values(d).map(String)),
-      headStyles: { fillColor: [13, 59, 31] },
-      alternateRowStyles: { fillColor: [220, 252, 231] },
-      styles: { fontSize: 9 },
+      headStyles: {
+        fillColor: [13, 59, 31],
+        textColor: [255, 255, 255],
+        fontSize: 7.5,
+        fontStyle: 'bold',
+        halign: 'center',
+        valign: 'middle',
+      },
+      bodyStyles: { fontSize: 7.5, textColor: [40, 40, 40] },
+      alternateRowStyles: { fillColor: [237, 250, 240] },
+      styles: { cellPadding: 4, overflow: 'linebreak', lineColor: [220, 220, 220], lineWidth: 0.5 },
+      columnStyles: {
+        2: { cellWidth: 65, fontStyle: 'bold' }, // Generic Name
+        3: { cellWidth: 50 }, // Brand Name
+      },
+      margin: { left: 20, right: 20 },
+      theme: 'grid',
+
+      // Footer on every page
+      didDrawPage: (pageData) => {
+        const pageCount = doc.internal.getNumberOfPages()
+        doc.setFontSize(8)
+        doc.setTextColor(120, 120, 120)
+        doc.text(
+          `Page ${pageData.pageNumber} of ${pageCount}`,
+          pageWidth - 20, doc.internal.pageSize.getHeight() - 15, { align: 'right' }
+        )
+        doc.text(
+          'This is a system-generated report.',
+          20, doc.internal.pageSize.getHeight() - 15
+        )
+      },
     })
+
     doc.save('medicine-stock.pdf')
     setShowExport(false); showToastMsg('Exported as PDF!')
   }
+
   const handleExportCSV = () => {
     const data = getExportData()
     if (!data.length) { showToastMsg('Nothing to export!'); return }
@@ -555,10 +648,11 @@ export default function MedicineStockPage() {
   const dosageLabel  = isSupplyTab ? 'Specification' : 'Dosage'
 
   // Total column count for the table (used by colSpan on loading/empty rows):
-  // No, Batch, Name, Dosage, Type, Manufacturer, Source, Unit, EXP, Status,
-  // Storage, Date Received, Boxes, Strip (Qty), Pieces, Actions = 16,
-  // + checkbox column when the tab isn't Archived.
-  const columnCount = activeTab !== 'archived' ? 17 : 16
+  // No, Batch, Name, Dosage, Type, Drug Category, Manufacturer, Manufacture
+  // Date, Source, Unit, EXP, Status, Storage, Date Received, Boxes,
+  // Strip (Qty), Pieces, Actions = 18, + checkbox column when the tab isn't
+  // Archived.
+  const columnCount = activeTab !== 'archived' ? 19 : 18
 
   const thStyle: React.CSSProperties = {
     padding: '12px 12px', textAlign: 'left', fontWeight: 800,
@@ -823,13 +917,15 @@ export default function MedicineStockPage() {
                     <th style={thStyle}>Medicine Name</th>
                     <th style={thStyle}>{dosageLabel}</th>
                     <th style={thStyle}>Type</th>
+                    <th style={thStyle}>Drug Category</th>
                     <th style={thStyle}>Manufacturer</th>
+                    <th style={thStyle}>Manufacture Date</th>
+                    <th style={thStyle}>EXP Date</th>
+                    <th style={thStyle}>Date Received</th>
                     <th style={thStyle}>Source</th>
                     <th style={thStyle}>Unit</th>
-                    <th style={thStyle}>EXP Date</th>
                     <th style={thStyle}>Status</th>
                     <th style={thStyle}>Storage</th>
-                    <th style={thStyle}>Date Received</th>
                     <th style={{ ...thStyle, textAlign: 'right', borderLeft: `2px dashed ${T.green}22`, minWidth: 90 }}>
                       <div style={{ fontSize: 8, color: T.text3, fontWeight: 700, letterSpacing: 0.4, marginBottom: 2 }}>WAREHOUSE</div>
                       Boxes
@@ -880,12 +976,26 @@ export default function MedicineStockPage() {
                     const expired = isExpired(med)
                     const sel     = med.selected
                     const rowBg   = sel ? `${T.green}08` : i % 2 === 0 ? card : card2
+                    // Safety net: don't fully trust the stored `status` column —
+                    // it's a snapshot written at insert/update time and can go
+                    // stale (e.g. old rows saved with Boxes=0 before that bug was
+                    // fixed, still sitting as 'available' in the DB even though
+                    // total_quantity is 0). If the batch has zero pieces, always
+                    // show Out of Stock regardless of what `status` says.
                     const statusType = expired ? 'expired'
+                      : med.total_quantity === 0 ? 'outofstock'
                       : med.status === 'out_of_stock' ? 'outofstock'
                       : med.status === 'low_stock' ? 'lowstock'
                       : 'instock'
                     const busy = actionBusyId === med.batch_id
                     const stripQty = stripQtyForRow(med)
+                    // Determines whether this row's Boxes/Strip columns show
+                    // real numbers or a plain "—" — a bottle of Suspension
+                    // was never really "1 box, 1 strip" in real life, that
+                    // was just an internal placeholder so the total_quantity
+                    // math would work. Same classification the Add form
+                    // uses, so the table and the form always agree.
+                    const rowPackagingMode = packagingModeFor(med.dosage_form, med.category === 'supply')
 
                     return (
                       <tr key={med.batch_id}
@@ -917,7 +1027,29 @@ export default function MedicineStockPage() {
                         </td>
                         <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.dosage_strength || '—'}</td>
                         <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.dosage_form || '—'}</td>
+                        <td style={{ padding: '11px 12px', fontSize: 11 }}>
+                          {med.category === 'drug' && med.drug_category ? (
+                            <span style={{
+                              padding: '2px 9px', borderRadius: 20, fontSize: 10, fontWeight: 700,
+                              background: T.greenLight, color: T.greenDark,
+                              whiteSpace: 'nowrap',
+                            }}>{med.drug_category}</span>
+                          ) : '—'}
+                        </td>
                         <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.manufacturer || '—'}</td>
+                        <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.manufacture_date || '—'}</td>
+                        <td style={{ padding: '11px 12px', fontSize: 11, color: expired ? T.red : txt2 }}>
+                          {med.expiration_date || '—'}
+                          {expired && (
+                            <span style={{
+                              fontSize: 9, marginLeft: 5,
+                              background: T.redLight, color: T.red,
+                              border: `1px solid ${T.redBorder}`,
+                              borderRadius: 4, padding: '1px 5px', fontWeight: 800,
+                            }}>EXPIRED</span>
+                          )}
+                        </td>
+                        <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.date_received || '—'}</td>
                         <td style={{ padding: '11px 12px', fontSize: 11 }}>
                           {med.source ? (
                             <span style={{
@@ -935,30 +1067,26 @@ export default function MedicineStockPage() {
                           ) : '—'}
                         </td>
                         <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.unit || '—'}</td>
-                        <td style={{ padding: '11px 12px', fontSize: 11, color: expired ? T.red : txt2 }}>
-                          {med.expiration_date || '—'}
-                          {expired && (
-                            <span style={{
-                              fontSize: 9, marginLeft: 5,
-                              background: T.redLight, color: T.red,
-                              border: `1px solid ${T.redBorder}`,
-                              borderRadius: 4, padding: '1px 5px', fontWeight: 800,
-                            }}>EXPIRED</span>
-                          )}
-                        </td>
                         <td style={{ padding: '11px 12px' }}><StatusBadge type={statusType} /></td>
                         <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.storage_location || '—'}</td>
-                        <td style={{ padding: '11px 12px', color: txt2, fontSize: 11 }}>{med.date_received || '—'}</td>
                         <td style={{ padding: '11px 12px', textAlign: 'right', borderLeft: `2px dashed ${T.green}22` }}>
-                          <div style={{ fontWeight: 900, fontSize: 14, color: txt }}>{med.boxes > 0 ? med.boxes : '—'}</div>
-                          <div style={{ fontSize: 10, color: T.text3 }}>{med.boxes > 0 ? 'boxes' : ''}</div>
+                          {rowPackagingMode === 'quantity' ? (
+                            <span style={{ color: T.text3 }}>—</span>
+                          ) : (
+                            <>
+                              <div style={{ fontWeight: 900, fontSize: 14, color: txt }}>{med.boxes > 0 ? med.boxes : '—'}</div>
+                              <div style={{ fontSize: 10, color: T.text3 }}>{med.boxes > 0 ? 'boxes' : ''}</div>
+                            </>
+                          )}
                         </td>
 
-                        {/* Strip (Qty) — derived from total_quantity ÷ pieces_per_strip,
-                            so loose pieces outside a full box still count toward strip
-                            availability as long as they're enough to form a whole strip. */}
+                        {/* Strip (Qty) — only meaningful for 'strip' mode items
+                            (Tablet/Capsule, blister-packed). Bottles/tubes/vials/
+                            ampules/etc. never have a "strip" in real life, so
+                            this column always shows — for them, regardless of
+                            what pieces_per_strip happens to hold internally. */}
                         <td style={{ padding: '11px 12px', textAlign: 'right' }}>
-                          {med.pieces_per_strip ? (
+                          {rowPackagingMode === 'strip' && med.pieces_per_strip ? (
                             <>
                               <div style={{ fontWeight: 900, fontSize: 14, color: txt }}>{stripQty}</div>
                               <div style={{ fontSize: 10, color: T.text3 }}>strips</div>
