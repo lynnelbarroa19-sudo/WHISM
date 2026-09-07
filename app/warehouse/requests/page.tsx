@@ -18,13 +18,16 @@
 // UNCHANGED: grouping logic (request_batch_id), status rollup, realtime
 // subscription, and the RequestBatchModal click-through — only the
 // presentation layer changed.
+//
+// LAYOUT NOTE: Sidebar/Topbar are no longer rendered on this page — they
+// live in the shared app/warehouse/layout.tsx now, so they stay mounted
+// across navigation instead of remounting (and blinking) on every tab
+// switch. This page renders only its own content.
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTheme } from 'next-themes'
 import { createClient } from '@supabase/supabase-js'
 import { Search, X, ClipboardList, Pill } from 'lucide-react'
-import Sidebar from '../components/Sidebar'
-import Topbar from '../components/Topbar'
 import RequestBatchModal from '../components/RequestBatchModal'
 // Shared theme tokens — same source of truth used by Medicine Inventory
 // and Medicine Releases, so all three pages stay visually consistent.
@@ -256,9 +259,14 @@ export default function PharmacyRequestsRecordsPage() {
   useEffect(() => {
     fetchRequests()
 
-    // Realtime subscription — new/updated requests from Pharmacy show up live.
+    // Realtime subscription — new/updated requests from Pharmacy show up
+    // live. Unique name per mount so this never collides with a
+    // still-subscribed channel from a prior mount (React Strict Mode's
+    // dev-only mount→cleanup→remount cycle can otherwise hand back an
+    // already-subscribed channel object before its predecessor's async
+    // removeChannel() has finished).
     const channel = supabase
-      .channel('pharmacy_requests_records')
+      .channel(`pharmacy_requests_records_${Math.random().toString(36).slice(2)}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'pharmacy_requests' }, () => {
         fetchRequests()
       })
@@ -349,19 +357,14 @@ export default function PharmacyRequestsRecordsPage() {
       : 'No requests yet.'
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: bg, fontFamily: 'Nunito, sans-serif' }}>
+    <>
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
         * { font-family: Nunito, sans-serif !important; }
       `}</style>
 
-      <Sidebar />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <Topbar />
-
-        <main style={{ flex: 1, padding: 24, overflowY: 'auto', background: bg }}>
+        <main style={{ padding: 24, overflowY: 'auto', background: bg, height: 'calc(100vh - var(--wh-topbar-h, 62px))' }}>
 
           {/* ── Page header ── */}
           <div style={{ marginBottom: 20 }}>
@@ -524,11 +527,10 @@ export default function PharmacyRequestsRecordsPage() {
           </div>
 
         </main>
-      </div>
 
       {openNotification && (
         <RequestBatchModal notification={openNotification} onClose={() => setOpenNotification(null)} />
       )}
-    </div>
+    </>
   )
 }

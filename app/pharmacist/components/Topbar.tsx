@@ -85,29 +85,13 @@ function BrandMark() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
       <div style={{
-        width: 42, height: 42, borderRadius: 12, flexShrink: 0,
-        background: 'linear-gradient(135deg,#22c55e,#0d9488)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        boxShadow: '0 3px 10px rgba(34,197,94,0.45), inset 0 1px 0 rgba(255,255,255,0.25)',
-        overflow: 'hidden',
+
       }}>
-        <img
-          src="/rhulogo.png" alt="MHO Logo"
-          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-          onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
-        />
+        
       </div>
       <div style={{ lineHeight: 1.15 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 1 }}>
-          <span style={{ color: '#fff', fontSize: 17, fontWeight: 800, letterSpacing: '-0.01em' }}>SMART</span>
-          <span style={{ color: '#4ade80', fontSize: 17, fontWeight: 800, letterSpacing: '-0.01em' }}>RHU</span>
-        </div>
-        <div style={{
-          fontSize: 9.5, fontWeight: 700, letterSpacing: 1.4, textTransform: 'uppercase',
-          color: 'rgba(255,255,255,0.55)', marginTop: 1,
-        }}>
-          Pharmacy
-        </div>
+        
+        
       </div>
     </div>
   )

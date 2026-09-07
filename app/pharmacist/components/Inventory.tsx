@@ -12,6 +12,19 @@
 // boxes * strips_per_box, shown only for "Boxes"-unit medicines (mirrors
 // how the Unit column already only shows a box count for that case).
 // Display-only; doesn't change any stored data or existing logic.
+//
+// THIS PASS 3 — BUG FIX: archiving was wired to the whole MEDICINE
+// (pharma_medicines.is_archived) even though the checkbox sits on a
+// per-BATCH row. Checking one batch and hitting "Archive" silently
+// archived every batch of that medicine, not just the one selected —
+// e.g. archiving one Paracetamol batch made ALL Paracetamol batches
+// disappear from the active table. Selection and archiving now operate
+// on batch_id via pharma_medicine_batches.status = "archived", so only
+// the specific batch(es) you check are affected; sibling batches of the
+// same medicine are left exactly as they were. The Archived tab now has
+// a third source (manually-archived individual batches) alongside the
+// existing "auto-expired batch" and "whole medicine archived" sources,
+// each restorable independently.
 "use client";
 import { CSSProperties, useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
@@ -63,6 +76,16 @@ function stripQty(b: BatchRow): number | null {
   if (!isBoxUnit(b.pharma_medicines?.unit)) return null;
   if (b.strips_per_box == null) return null;
   return (b.boxes ?? 0) * b.strips_per_box;
+}
+
+/** Recomputes the status a batch should have based on its current
+ *  quantity — same thresholds used when creating/editing a batch, reused
+ *  here when restoring a manually-archived batch so it lands back in the
+ *  correct state instead of defaulting to "available" regardless of stock. */
+function statusForQuantity(qty: number): BatchStatus {
+  if (qty === 0) return "out_of_stock";
+  if (qty <= 10) return "low_stock";
+  return "available";
 }
 
 async function exportToExcel(rows: BatchRow[], tabLabel: string) {
@@ -179,7 +202,7 @@ function EditBatchModal({ batch, onClose, onSaved, onToast }: {
       const boxesN = Math.max(0, parseInt(boxes, 10) || 0);
       const looseN = Math.max(0, parseInt(loosePieces, 10) || 0);
       const total = boxesN * piecesPerBox + looseN;
-      const newStatus = total === 0 ? "out_of_stock" : total <= 10 ? "low_stock" : "available";
+      const newStatus = statusForQuantity(total);
 
       const { error } = await supabase.from("pharma_medicine_batches").update({
         batch_number: batchNumber.trim() || null,
@@ -313,10 +336,17 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
   const [batchRows, setBatchRows] = useState<BatchRow[]>([]);
   const [archivedMeds, setArchivedMeds] = useState<MedicineStockSummary[]>([]);
   const [archivedBatches, setArchivedBatches] = useState<ArchivedBatchRow[]>([]);
+  // Manually-archived individual batches (pharma_medicine_batches.status ==
+  // "archived") — distinct from archivedBatches above, which are batches
+  // auto-archived on expiry into a separate pharma_archived_batches table.
+  // This is the source that fixes the reported bug: archiving one batch no
+  // longer touches its sibling batches or the parent medicine at all.
+  const [manuallyArchivedBatches, setManuallyArchivedBatches] = useState<BatchRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingArchived, setLoadingArchived] = useState(false);
   const [loadingArchivedBatches, setLoadingArchivedBatches] = useState(false);
-  const [selected, setSelected] = useState<string[]>([]);
+  const [loadingManuallyArchivedBatches, setLoadingManuallyArchivedBatches] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]); // batch_id[]
   const [showExport, setShowExport] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingBatch, setEditingBatch] = useState<BatchRow | null>(null);
@@ -399,6 +429,25 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
     finally { setLoadingArchivedBatches(false); }
   }, [onToast]);
 
+  /** Individually-archived batches (status = "archived") whose parent
+   *  medicine is still active. This is the correct home for a "archive
+   *  just this one batch" action — the medicine and its other batches are
+   *  untouched. */
+  const fetchManuallyArchivedBatches = useCallback(async () => {
+    setLoadingManuallyArchivedBatches(true);
+    try {
+      const { data, error } = await supabase
+        .from("pharma_medicine_batches")
+        .select("*, pharma_medicines(generic_name, dosage_strength, dosage_form, category, unit, is_archived)")
+        .eq("status", "archived")
+        .order("expiration_date", { ascending: true });
+      if (error) throw error;
+      const rows = ((data as BatchRow[]) ?? []).filter(b => b.pharma_medicines && !b.pharma_medicines.is_archived);
+      setManuallyArchivedBatches(rows);
+    } catch (err: any) { onToast(err.message || "Failed to load archived batches.", "error"); }
+    finally { setLoadingManuallyArchivedBatches(false); }
+  }, [onToast]);
+
   const unarchiveItem = async (id: string) => {
     try {
       await supabase.from("pharma_medicines").update({ is_archived: false }).eq("medicine_id", id);
@@ -407,19 +456,54 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
     } catch (err: any) { onToast(err.message || "Failed to restore.", "error"); }
   };
 
+  /** Restores a single manually-archived batch back to active stock,
+   *  recomputing its status (available / low_stock / out_of_stock) from
+   *  its current quantity rather than assuming "available". */
+  const restoreBatch = async (batch: BatchRow) => {
+    try {
+      const newStatus = statusForQuantity(batch.total_quantity);
+      await supabase.from("pharma_medicine_batches").update({ status: newStatus }).eq("batch_id", batch.batch_id);
+      onToast("Batch restored successfully.", "success");
+      fetchBatchRows(); fetchMedicines(); fetchManuallyArchivedBatches();
+    } catch (err: any) { onToast(err.message || "Failed to restore batch.", "error"); }
+  };
+
   useEffect(() => { fetchMedicines(); }, [fetchMedicines]);
   useEffect(() => { fetchBatchRows(); }, [fetchBatchRows]);
   useEffect(() => { fetchArchived(); }, [fetchArchived]);
   useEffect(() => { fetchArchivedBatches(); }, [fetchArchivedBatches]);
+  useEffect(() => { fetchManuallyArchivedBatches(); }, [fetchManuallyArchivedBatches]);
   useEffect(() => { setSelected([]); }, [activeTab]);
 
+  // BUG FIX: opening the Archived tab (toggling showArchived) never
+  // refetched anything — it just flipped a boolean, so it showed whatever
+  // was fetched at page load. If a batch was archived while viewing the
+  // active table (the normal flow), the Archived tab wouldn't show it
+  // until a full page reload. This refetches all three archived sources
+  // every time the tab is opened, so it's always current.
+  useEffect(() => {
+    if (showArchived) {
+      fetchArchived();
+      fetchArchivedBatches();
+      fetchManuallyArchivedBatches();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived]);
+
+  /** Archives only the specifically-selected BATCH(es) — sets
+   *  pharma_medicine_batches.status = "archived" by batch_id. Sibling
+   *  batches of the same medicine, and the medicine itself, are never
+   *  touched by this action. (Previously this updated
+   *  pharma_medicines.is_archived by medicine_id, which archived every
+   *  batch of that medicine regardless of which row was checked.) */
   const archiveSelected = async () => {
     if (selected.length === 0) return;
     try {
-      await supabase.from("pharma_medicines").update({ is_archived: true }).in("medicine_id", selected);
-      onToast(`Archived ${selected.length} item(s).`, "success");
-      setSelected([]); fetchMedicines(); fetchBatchRows();
-      if (showArchived) fetchArchived();
+      const { error } = await supabase.from("pharma_medicine_batches").update({ status: "archived" }).in("batch_id", selected);
+      if (error) throw error;
+      onToast(`Archived ${selected.length} batch${selected.length !== 1 ? "es" : ""}.`, "success");
+      setSelected([]);
+      fetchBatchRows(); fetchMedicines();
     } catch (err: any) { onToast(err.message || "Failed to archive.", "error"); }
   };
 
@@ -463,12 +547,15 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
   const supplyCount = medicines.filter(m => m.category === "supplies").length;
  const tabLabel = activeTab === "all" ? "All Medicines" : activeTab === "drugs" ? "Medicine Drugs" : "Medicine Supplies";
 
-  const uniqueMedicineIds = Array.from(new Set(activeBatchRows.map(b => b.medicine_id)));
-  const toggleAll = () => setSelected(s => s.length === uniqueMedicineIds.length ? [] : uniqueMedicineIds);
+  // Selection now tracks batch_id (one checkbox = one batch), not
+  // medicine_id — this is the core of the fix.
+  const allBatchIds = activeBatchRows.map(b => b.batch_id);
+  const toggleAll = () => setSelected(s => s.length === allBatchIds.length ? [] : allBatchIds);
   const toggleRow = (id: string) => setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
 
   const thStyle: CSSProperties = { padding: "12px 12px", textAlign: "left", fontWeight: 800, color: t.green, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.8, whiteSpace: "nowrap" };
   const activeExtraFilterCount = (stockFilter !== "all" ? 1 : 0) + (expiryFilter !== "all" ? 1 : 0);
+  const totalArchivedCount = archivedBatches.length + archivedMeds.length + manuallyArchivedBatches.length;
 
   return (
     <main style={{ flex: 1, padding: 24, overflowY: "auto", background: t.surface2 }}>
@@ -549,7 +636,7 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
         display: "flex", alignItems: "center", gap: 6,
       }}>
         <ArchiveIcon size={13} /> Archived
-        <span style={{ background: showArchived ? "rgba(255,255,255,0.25)" : t.border, color: showArchived ? "#fff" : t.text2, borderRadius: 20, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>{archivedMeds.length + archivedBatches.length}</span>
+        <span style={{ background: showArchived ? "rgba(255,255,255,0.25)" : t.border, color: showArchived ? "#fff" : t.text2, borderRadius: 20, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>{totalArchivedCount}</span>
       </button>
     </div>
 
@@ -578,7 +665,7 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
     {!showArchived && (
       <>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: t.text2, cursor: "pointer", padding: "5px 14px", borderRadius: 20, border: `1.5px solid ${t.border}` }}>
-          <input type="checkbox" checked={uniqueMedicineIds.length > 0 && selected.length === uniqueMedicineIds.length} onChange={toggleAll} style={{ accentColor: t.green, width: 12, height: 12 }} />
+          <input type="checkbox" checked={allBatchIds.length > 0 && selected.length === allBatchIds.length} onChange={toggleAll} style={{ accentColor: t.green, width: 12, height: 12 }} />
           Select All
         </label>
         {selected.length > 0 && (
@@ -623,7 +710,7 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
                     {search || activeExtraFilterCount > 0 ? "No batches match your search/filters." : `No ${tabLabel.toLowerCase()} batches yet. Add a medicine to get started.`}
                   </td></tr>
                 ) : activeBatchRows.map((b, n) => {
-                  const sel = selected.includes(b.medicine_id);
+                  const sel = selected.includes(b.batch_id);
                   const days = daysUntil(b.expiration_date);
                   const isExpiring = days <= 30;
                   const rowBg = sel ? `${t.green}0d` : "transparent";
@@ -634,7 +721,7 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
                     <tr key={b.batch_id} style={{ background: rowBg, borderBottom: `1px solid ${t.border}` }}>
                       <td style={{ padding: "11px 12px" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <input type="checkbox" checked={sel} onChange={() => toggleRow(b.medicine_id)} style={{ accentColor: t.green, width: 12, height: 12 }} />
+                          <input type="checkbox" checked={sel} onChange={() => toggleRow(b.batch_id)} style={{ accentColor: t.green, width: 12, height: 12 }} />
                           <span style={{ color: t.text2, fontSize: 12 }}>{n + 1}</span>
                         </div>
                       </td>
@@ -683,9 +770,10 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
         </div>
       )}
 
-      {/* Archived — unified table, combines auto-archived expired batches
-          and manually-archived medicines into one list with a Reason
-          column instead of separate sub-tabs. */}
+      {/* Archived — unified table, combines three sources: batches
+          auto-archived on expiry, individual batches manually archived
+          (parent medicine still active — this is the fix), and whole
+          medicines manually archived. Each restores independently. */}
       {showArchived && (
         <div style={{ background: t.cardBg, border: `1px solid ${t.cardBorder}`, borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.05)" }}>
           <div style={{ overflowX: "auto" }}>
@@ -698,9 +786,9 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
                 </tr>
               </thead>
               <tbody>
-                {(loadingArchived || loadingArchivedBatches) ? (
+                {(loadingArchived || loadingArchivedBatches || loadingManuallyArchivedBatches) ? (
                   <tr><td colSpan={9} style={{ textAlign: "center", padding: 48, color: t.text2 }}>Loading archived items...</td></tr>
-                ) : (archivedBatches.length === 0 && archivedMeds.length === 0) ? (
+                ) : (archivedBatches.length === 0 && archivedMeds.length === 0 && manuallyArchivedBatches.length === 0) ? (
                   <tr><td colSpan={9} style={{ textAlign: "center", padding: 48, color: t.text2 }}>No archived items.</td></tr>
                 ) : (
                   <>
@@ -719,9 +807,33 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
                         <td style={{ padding: "11px 12px", textAlign: "center", color: t.text3, fontSize: 10.5, fontStyle: "italic" }}>—</td>
                       </tr>
                     ))}
+                    {manuallyArchivedBatches.map((b, n) => {
+                      const boxUnit = isBoxUnit(b.pharma_medicines?.unit);
+                      return (
+                        <tr key={b.batch_id} style={{ borderBottom: `1px solid ${t.border}` }}>
+                          <td style={{ padding: "11px 12px", color: t.text2 }}>{archivedBatches.length + n + 1}</td>
+                          <td style={{ padding: "11px 12px", fontWeight: 700, color: t.text }}>{b.pharma_medicines?.generic_name ?? "—"}</td>
+                          <td style={{ padding: "11px 12px", color: t.text2 }}>{b.pharma_medicines?.dosage_strength || "—"} / {b.pharma_medicines?.dosage_form || "—"}</td>
+                          <td style={{ padding: "11px 12px", color: t.text2 }}>{b.pharma_medicines?.unit || "—"}</td>
+                          <td style={{ padding: "11px 12px" }}>
+                            <span style={{ fontSize: 9.5, fontWeight: 800, padding: "2px 9px", borderRadius: 20, background: "#f3f4f6", color: "#6b7280" }}>Batch</span>
+                          </td>
+                          <td style={{ padding: "11px 12px", color: t.text2 }}>Batch {b.batch_number || "—"} · exp {b.expiration_date || "—"}</td>
+                          <td style={{ padding: "11px 12px", textAlign: "right", color: t.text2 }}>
+                            {b.total_quantity} {boxUnit ? "pcs" : (b.pharma_medicines?.unit || "pcs")}
+                          </td>
+                          <td style={{ padding: "11px 12px", color: t.text3, fontSize: 11 }}>—</td>
+                          <td style={{ padding: "11px 12px", textAlign: "center" }}>
+                            <button onClick={() => restoreBatch(b)} style={{ background: "#dcfce7", color: "#166534", border: "1.5px solid #86efac", borderRadius: 20, padding: "3px 14px", fontSize: 10, fontWeight: 800, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                              <RotateCcw size={10} /> Restore
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {archivedMeds.map((med, n) => (
                       <tr key={med.medicine_id} style={{ borderBottom: `1px solid ${t.border}` }}>
-                        <td style={{ padding: "11px 12px", color: t.text2 }}>{archivedBatches.length + n + 1}</td>
+                        <td style={{ padding: "11px 12px", color: t.text2 }}>{archivedBatches.length + manuallyArchivedBatches.length + n + 1}</td>
                         <td style={{ padding: "11px 12px", fontWeight: 700, color: t.text }}>{med.generic_name}</td>
                         <td style={{ padding: "11px 12px", color: t.text2 }}>{med.dosage_strength || "—"} / {med.dosage_form || "—"}</td>
                         <td style={{ padding: "11px 12px", color: t.text2 }}>{med.unit || "—"}</td>
@@ -745,8 +857,8 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
           </div>
           <div style={{ padding: "14px 18px", borderTop: `1px solid ${t.border}`, background: t.surface2 }}>
             <span style={{ fontSize: 12, color: t.text2, fontWeight: 600 }}>
-              {archivedBatches.length + archivedMeds.length} archived item{(archivedBatches.length + archivedMeds.length) !== 1 ? "s" : ""}
-              {" "}({archivedBatches.length} expired, {archivedMeds.length} manual)
+              {totalArchivedCount} archived item{totalArchivedCount !== 1 ? "s" : ""}
+              {" "}({archivedBatches.length} expired, {manuallyArchivedBatches.length} batch{manuallyArchivedBatches.length !== 1 ? "es" : ""}, {archivedMeds.length} manual)
             </span>
           </div>
         </div>

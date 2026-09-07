@@ -1,15 +1,56 @@
 'use client'
-import { ReactNode, useState, useEffect } from 'react'
+import { ReactNode, useState, useEffect, useRef } from 'react'
 import { useTheme } from 'next-themes'
 import { WarehouseModalsProvider, useWarehouseModals } from './components/WarehouseModalsContext'
 import AddMedicineModal from './components/AddMedicineModal'
 import DispenseMedicineModal from './components/DispenseMedicineModal'
+import Sidebar from './components/Sidebar'
+import Topbar from './components/Topbar'
 import styles from './components/warehouse.module.css'
 
 export default function WarehouseLayout({ children }: { children: ReactNode }) {
+  // ── Dark-mode class + measured Topbar height, so every page under
+  //    /warehouse/* gets the same var(--text)/var(--border)/etc. CSS
+  //    variables (defined only inside .root/.root.dark in
+  //    warehouse.module.css) and the same --wh-topbar-h that
+  //    dashboard/settings use for their "fixed viewport, own scroll"
+  //    content wrappers.
+  const { theme } = useTheme()
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => setMounted(true), [])
+
+  const topbarRef = useRef<HTMLDivElement>(null)
+  const [topbarHeight, setTopbarHeight] = useState(0)
+  useEffect(() => {
+    const measure = () => { if (topbarRef.current) setTopbarHeight(topbarRef.current.offsetHeight) }
+    measure()
+    const ro = new ResizeObserver(measure)
+    if (topbarRef.current) ro.observe(topbarRef.current)
+    window.addEventListener('resize', measure)
+    return () => { ro.disconnect(); window.removeEventListener('resize', measure) }
+  }, [])
+
   return (
     <WarehouseModalsProvider>
-      {children}
+      {/* Sidebar/Topbar live INSIDE the provider — Sidebar itself calls
+          useWarehouseModals() to know whether a modal is open (for nav
+          active-state suppression), so it has to render below the
+          provider, not above it. */}
+      <div
+        className={`${styles.root} ${mounted && theme === 'dark' ? styles.dark : ''}`}
+        style={{ display: 'flex', minHeight: '100vh' }}
+      >
+        <Sidebar />
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+          <div ref={topbarRef}>
+            <Topbar />
+          </div>
+          <div style={{ flex: 1, minWidth: 0, '--wh-topbar-h': `${topbarHeight}px` } as React.CSSProperties}>
+            {children}
+          </div>
+        </div>
+      </div>
+
       <GlobalWarehouseModals />
     </WarehouseModalsProvider>
   )

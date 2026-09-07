@@ -115,6 +115,11 @@
 // direct canvas-relative coordinates from the pointer event, exactly
 // like the old mouse/touch path already did. There is no more Pointer
 // Lock, no virtual pen position, and no window-level pen listener.
+//
+// LAYOUT NOTE: Sidebar/Topbar are no longer rendered on this page —
+// they live in the shared app/warehouse/layout.tsx now, so they stay
+// mounted across navigation instead of remounting (and blinking) on
+// every tab switch. This page renders only its own content.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useTheme } from 'next-themes'
@@ -124,9 +129,6 @@ import {
 } from 'lucide-react'
 // Adjust this import path to match your actual Supabase client location.
 import { supabase } from '@/lib/supabase'
-// Layout pieces — these keep the sidebar/topbar visible on this page.
-import Sidebar from '../components/Sidebar'
-import Topbar from '../components/Topbar'
 // Shared theme tokens — same source of truth used by the Medicine
 // Inventory page, so both pages stay visually consistent.
 import { T } from '../components/SharedMedicine'
@@ -953,7 +955,7 @@ export default function ReleasesPage() {
   const canConfirmReceive = !!receiveName && !!receivePosition && receiveHasSignature && !confirmSubmitting
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: bg, fontFamily: 'Nunito, sans-serif' }}>
+    <>
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
@@ -975,12 +977,7 @@ export default function ReleasesPage() {
         }
       `}</style>
 
-      <Sidebar />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <Topbar />
-
-        <main style={{ flex: 1, padding: 24, overflowY: 'auto', background: bg }}>
+        <main style={{ padding: 24, overflowY: 'auto', background: bg, height: 'calc(100vh - var(--wh-topbar-h, 62px))' }}>
 
           {/* ── Page header ── */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
@@ -1545,8 +1542,6 @@ export default function ReleasesPage() {
           )}
 
         </main>
-      </div>
-
-    </div>
+    </>
   )
 }

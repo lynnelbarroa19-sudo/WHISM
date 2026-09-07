@@ -2,46 +2,17 @@
 import { CSSProperties, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useTheme, MedicineStockSummary } from "../lib/pharmacy";
-import { fetchStockSummary, fetchSeasonalInsights } from "../lib/pharmacyData";
+import { fetchStockSummary } from "../lib/pharmacyData";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
 
 type DispenseEntry = { medicine_id: string; quantity: number; dispensed_at: string; med_name: string };
 type StockSort = "az" | "most" | "least";
-type SeasonalInsight = {
-  medicine_id: string;
-  generic_name: string;
-  month_num: number;
-  total_qty: number;
-  seasonal_index: number;
-};
 
 type Props = {
   totalCount?: number;
 };
-
-// Standard English month names, used for the Seasonal Trends panel's
-// month label (e.g. "August").
-const MONTH_NAMES = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
-const monthLabel = (monthNum: number) => MONTH_NAMES[monthNum - 1] ?? "";
-
-// The Philippines has two pronounced seasons per PAGASA (the national
-// weather bureau): a Dry Season (November–April) and a Wet/Rainy Season
-// (May–October). Tagging each seasonal insight with its season gives the
-// pharmacist context for *why* a medicine spikes in a given month — e.g.
-// antihistamines and cough/cold medicine typically spike in the Rainy
-// Season, while heat-related supplies spike in the Dry Season.
-type Season = "Dry Season" | "Rainy Season";
-const getSeason = (monthNum: number): Season => {
-  const dryMonths = [11, 12, 1, 2, 3, 4];
-  return dryMonths.includes(monthNum) ? "Dry Season" : "Rainy Season";
-};
-const seasonColor = (season: Season) =>
-  season === "Dry Season" ? "#d97706" : "#2563eb";
 
 function useBreakpoint() {
   const [w, setW] = useState(1280);
@@ -68,11 +39,6 @@ const CalendarIcon = ({ color = "currentColor", size = 13 }: { color?: string; s
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" />
     <line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
-  </svg>
-);
-const TrendIcon = ({ color = "#fff", size = 14 }: { color?: string; size?: number }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" /><polyline points="17 6 23 6 23 12" />
   </svg>
 );
 const StarIcon = ({ color = "#fff" }: { color?: string }) => (
@@ -394,12 +360,6 @@ export default function Dashboard({ totalCount }: Props) {
   const [loadingMeds, setLoadingMeds] = useState(true);
   const [loadingDispense, setLoadingDispense] = useState(true);
 
-  // Seasonal Trends panel (Phase 1 — statistical index from pharma_seasonal_index).
-  // Same loading-flag pattern as the fetches above, so this panel gets its
-  // own spinner instead of flashing an empty state.
-  const [seasonal, setSeasonal] = useState<SeasonalInsight[]>([]);
-  const [loadingSeasonal, setLoadingSeasonal] = useState(true);
-
   const now = new Date();
 
   useEffect(() => {
@@ -433,18 +393,6 @@ export default function Dashboard({ totalCount }: Props) {
       }
     }
     load();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoadingSeasonal(true);
-    const currentMonth = now.getMonth() + 1; // 1-12
-    fetchSeasonalInsights(currentMonth)
-      .then(rows => { if (!cancelled) setSeasonal(rows); })
-      .catch(() => { if (!cancelled) setSeasonal([]); })
-      .finally(() => { if (!cancelled) setLoadingSeasonal(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -736,58 +684,6 @@ export default function Dashboard({ totalCount }: Props) {
                     </div>
                     <span style={{ fontSize: 12.5, fontWeight: 800, color: t.text, width: 44, textAlign: "right", flexShrink: 0 }}>
                       {m.total_quantity}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Seasonal Trends — medicines with abnormally high demand this month,
-          based on historical dispense patterns (pharma_seasonal_index view).
-          Each result is tagged with its PAGASA season (Dry/Rainy) so the
-          pharmacist understands *why* demand shifts, not just that it does —
-          e.g. cold/flu medicine typically spikes in the Rainy Season. */}
-      <div style={cardStyle}>
-        <PanelHeader>
-          <TrendIcon /> Seasonal Trends · {monthLabel(now.getMonth() + 1)} {!loadingSeasonal && `(${seasonal.length})`}
-        </PanelHeader>
-        <div style={{ padding: 16 }}>
-          <div style={{ fontSize: 11.5, color: t.text3, marginBottom: 14, lineHeight: 1.5 }}>
-            Medicines showing significantly higher demand this month compared to their yearly average,
-            based on historical dispensing patterns. Each result is tagged with the Philippines' current
-            climate season (per PAGASA), since demand for certain medicines tends to follow seasonal
-            weather patterns — for example, higher demand for cold and flu medicine during the Rainy
-            Season, or for rehydration supplies during the Dry Season.
-          </div>
-
-          {loadingSeasonal ? (
-            <div style={{ display: "flex", justifyContent: "center", padding: "36px 0" }}><Spinner /></div>
-          ) : seasonal.length === 0 ? (
-            <div style={emptyMsg}>Not enough historical data yet to identify seasonal trends for this month.</div>
-          ) : (
-            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3, 1fr)", gap: 10 }}>
-              {seasonal.map(row => {
-                const season = getSeason(row.month_num);
-                const sColor = seasonColor(season);
-                return (
-                  <div key={row.medicine_id} style={{
-                    border: `1px solid ${t.border}`, borderRadius: 12, padding: "12px 14px",
-                    display: "flex", flexDirection: "column", gap: 6,
-                  }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                      <span style={{ fontSize: 12.5, fontWeight: 700, color: t.text }}>{row.generic_name}</span>
-                      <span style={{
-                        fontSize: 9.5, fontWeight: 800, color: sColor, background: `${sColor}18`,
-                        borderRadius: 10, padding: "2px 8px", whiteSpace: "nowrap", textTransform: "uppercase", letterSpacing: 0.3,
-                      }}>
-                        {season}
-                      </span>
-                    </div>
-                    <span style={{ fontSize: 11, color: t.green, fontWeight: 700 }}>
-                      {row.seasonal_index.toFixed(1)}× higher demand in {monthLabel(row.month_num)}
                     </span>
                   </div>
                 );

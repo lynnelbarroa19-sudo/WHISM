@@ -116,23 +116,20 @@ export default function Topbar() {
   const [showProfile, setShowProfile] = useState(false)
   const [time, setTime] = useState('')
 
-  // ── Profile state — initialized from localStorage cache for instant display,
-  //     then refreshed from Supabase via fetchProfile() ──
-  const [userName, setUserName] = useState(() => {
-    if (typeof window === 'undefined') return 'Name'
-    try {
-      const raw = localStorage.getItem('smartrhu_user')
-      if (raw) { const u = JSON.parse(raw); if (u?.name) return u.name }
-    } catch {}
-    return localStorage.getItem('userName') || 'Name'
-  })
+  // ── Profile state — starts at safe defaults that match what the server
+  //     renders (no window/localStorage there), then gets seeded from the
+  //     localStorage cache in a mount-only useEffect below, and finally
+  //     refreshed from Supabase via fetchProfile(). Reading localStorage
+  //     directly inside useState's initializer (like before) made the
+  //     server always render "Name"/no-avatar while the client instantly
+  //     rendered the cached name/photo — exactly what triggers a
+  //     hydration mismatch, and since Topbar now renders on every
+  //     warehouse page via the shared layout, that mismatch would have
+  //     shown up everywhere, not just here. ──
+  const [userName, setUserName] = useState('Name')
   const [userRole, setUserRole] = useState('Member')
-  const [userEmail, setUserEmail] = useState(
-    typeof window !== 'undefined' ? localStorage.getItem('userEmail') || '' : ''
-  )
-  const [userAvatar, setUserAvatar] = useState<string | null>(
-    typeof window !== 'undefined' ? localStorage.getItem('userAvatar') : null
-  )
+  const [userEmail, setUserEmail] = useState('')
+  const [userAvatar, setUserAvatar] = useState<string | null>(null)
 
   // Pharmacy-request notifications (persistent, DB-backed)
   const [notifications, setNotifications] = useState<AppNotification[]>([])
@@ -243,6 +240,26 @@ export default function Topbar() {
 
   useEffect(() => {
     setMounted(true)
+
+    // Seed instant-display values from the localStorage cache — client-side
+    // only, so this never runs during SSR and never disagrees with the
+    // server-rendered defaults above. fetchProfile() below will overwrite
+    // these with the real data moments later anyway.
+    try {
+      const raw = localStorage.getItem('smartrhu_user')
+      if (raw) {
+        const u = JSON.parse(raw)
+        if (u?.name) setUserName(u.name)
+      } else {
+        const cachedName = localStorage.getItem('userName')
+        if (cachedName) setUserName(cachedName)
+      }
+    } catch {}
+    const cachedEmail = localStorage.getItem('userEmail')
+    if (cachedEmail) setUserEmail(cachedEmail)
+    const cachedAvatar = localStorage.getItem('userAvatar')
+    if (cachedAvatar) setUserAvatar(cachedAvatar)
+
     fetchNotifications()
     fetchAlerts()
     fetchProfile()
@@ -255,9 +272,16 @@ export default function Topbar() {
     window.addEventListener('profileUpdated', fetchProfile)
     window.addEventListener('avatarUpdated', fetchProfile)
 
-    // Live pharmacy-request notifications
+    // Live pharmacy-request notifications — the channel name includes a
+    // random suffix so each mount gets its own, distinct channel object.
+    // Supabase's client caches/reuses channels by name; reusing the same
+    // fixed name across mounts (e.g. under React Strict Mode's dev-only
+    // mount→cleanup→remount cycle) can hand back an already-subscribed
+    // channel before its predecessor's async removeChannel() has finished,
+    // and calling .on() on that throws "cannot add postgres_changes
+    // callbacks... after subscribe()".
     const notifChannel = supabase
-      .channel('warehouse_notifications')
+      .channel(`warehouse_notifications_${Math.random().toString(36).slice(2)}`)
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: NOTIF_TABLE, filter: `recipient_role=eq.${MY_ROLE}` },
@@ -437,7 +461,7 @@ export default function Topbar() {
 
         {/* Brand title — static, replaces the per-page title */}
         <h2 style={{ color: '#fff', fontSize: 18, fontWeight: 700, margin: 0, letterSpacing: '-.01em' }}>
-          SMARTRHU
+         
         </h2>
 
         <div className={styles.topbarActions}>
