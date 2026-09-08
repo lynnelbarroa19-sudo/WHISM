@@ -22,6 +22,35 @@ interface AddMedicineModalProps {
   dk: boolean
 }
 
+// Drug Category — clinical classification (Analgesics, Antibiotics, etc.).
+// Only applicable to Medical Drugs, never Medical Supplies. Values MUST match
+// the DB CHECK constraint `medicines_drug_category_check` exactly.
+const DRUG_CATEGORIES = [
+  'Analgesics',
+  'Antibiotics',
+  'Antihypertensives',
+  'Antihistamines',
+  'Antacids',
+  'Antidepressants',
+  'Anti-inflammatories',
+  'Others',
+] as const
+
+// Types that come as individual bottles/tubes/syringes rather than boxes at
+// all — for these, a single plain "Quantity" field is shown (Boxes and
+// Strips/Box are hidden entirely). Matched case-insensitively against Type.
+const QUANTITY_ONLY_TYPES = [
+  'Drops', 'Syrup', 'Suspension', 'Ointment', 'Vaccine', 'Injection',
+  'Bottle', 'Tube', 'Pre-filled Syringe',
+]
+
+// Types that DO usually arrive boxed (e.g. "1 box = 25 ampules"), but never
+// have a "strip" in between — for these, show Boxes + Pcs/Box, same shape as
+// Medical Supplies, with no Strips/Box field.
+const BOX_NO_STRIP_TYPES = [
+  'Vial', 'Ampules', 'Carpules', 'Nebules',
+]
+
 const blankForm = {
   genericName: '', brandName: '', dosageStrength: '', dosageForm: '',
   unit: '', manufacturer: '', source: '' as '' | 'DOH' | 'PhilHealth' | 'LGU', batchNumber: '',
@@ -29,6 +58,7 @@ const blankForm = {
   boxes: '', stripsPerBox: '', piecesPerStrip: '',
   storageLocation: '', dateReceived: new Date().toISOString().split('T')[0], remarks: '',
   category: '' as '' | 'drug' | 'supply',
+  drugCategory: '' as string, // Analgesics / Antibiotics / etc. — drugs only
 }
 
 // '' -> null, otherwise trimmed string. Keeps matching consistent with how we
@@ -69,6 +99,19 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
   const typeOptions = isSupplyTab ? SUPPLY_TYPES : DRUG_TYPES
   const dosageLabel = isSupplyTab ? 'Specification' : 'Mg / Dosage'
   const todayStr = new Date().toISOString().split('T')[0]   // dates can never be before this
+
+  // Which stock-quantity layout to show, based on the selected Type:
+  // - 'quantity': bottles/tubes/syringes/liquids — single plain Quantity field
+  // - 'box':      vials/ampules/carpules/nebules (and all Medical Supplies) —
+  //               Boxes + Pcs/Box, no Strips/Box
+  // - 'strip':    tablets/capsules (the default) — Boxes + Strips/Box + Pcs/Strip
+  const packagingMode: 'quantity' | 'box' | 'strip' = isSupplyTab
+    ? 'box'
+    : QUANTITY_ONLY_TYPES.some(t => t.toLowerCase() === form.dosageForm.trim().toLowerCase())
+    ? 'quantity'
+    : BOX_NO_STRIP_TYPES.some(t => t.toLowerCase() === form.dosageForm.trim().toLowerCase())
+    ? 'box'
+    : 'strip'
 
   // Manufacture date must be before the expiration date, and can't be in the
   // future. If an EXP date is already set, cap manufacture date at the day
@@ -141,21 +184,24 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
 
     setIsSaving(true)
 
-    const boxes = Math.max(0, Number(form.boxes) || 0)
+    // 'quantity' mode (bottles, tubes, syringes, liquids): no real "box" —
+    // always treat the batch as a single logical box of 1 and let the
+    // Quantity field (piecesPerStrip under the hood) carry the real count.
+    // 'box' mode (vials, ampules, carpules, nebules, and all Medical
+    // Supplies): a real Boxes field is shown, but never a Strips/Box.
+    // 'strip' mode (tablets, capsules — the default): all three fields apply.
+    const boxes = packagingMode === 'quantity'
+      ? 1
+      : Math.max(0, Number(form.boxes) || 0)
 
     // strips_per_box / pieces_per_strip are nullable in the DB — not every
-    // item ships in strips (e.g. bottles, masks). Blank input -> null,
-    // not 0, so the CHECK constraints (which allow NULL) and the
-    // total_quantity formula (COALESCE(..., 0)) treat it the same way.
-    //
-    // Medical Supplies never have a strip breakdown at all — that concept
-    // only applies to drugs (e.g. a strip of tablets inside a box). For
-    // supplies, "Strips / Box" is never shown to the user and is always
-    // treated as blank/null here, regardless of whatever value may still be
-    // sitting in form state from a prior category switch.
-    const stripsPerBox   = isSupplyTab
-      ? null
-      : (form.stripsPerBox.trim() === '' ? null : Math.max(0, Number(form.stripsPerBox) || 0))
+    // item ships in strips. Blank input -> null, not 0, so the CHECK
+    // constraints (which allow NULL) and the total_quantity formula
+    // (COALESCE(..., 0)) treat it the same way. Strips/Box only ever applies
+    // in 'strip' mode — everything else always stores null here.
+    const stripsPerBox   = packagingMode === 'strip'
+      ? (form.stripsPerBox.trim() === '' ? null : Math.max(0, Number(form.stripsPerBox) || 0))
+      : null
     const piecesPerStrip = form.piecesPerStrip.trim() === '' ? null : Math.max(1, Number(form.piecesPerStrip) || 1)
 
     // total_quantity = boxes × strips_per_box × pieces_per_strip (the DB's
@@ -166,7 +212,9 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
     // disappear silently.
     if (boxes > 0 && piecesPerStrip === null) {
       showToast(
-        isSupplyTab
+        packagingMode === 'quantity'
+          ? 'Error: "Quantity" is required.'
+          : packagingMode === 'box'
           ? 'Error: "Pcs / Box" is required when Boxes is entered — it converts boxes into countable pieces.'
           : 'Error: "Pcs / Strip" is required when Boxes is entered — it converts boxes into countable pieces. If this item isn\'t packaged in strips, just enter the pieces-per-box count here and leave "Strips / Box" blank (it defaults to 1).'
       )
@@ -213,6 +261,9 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
           dosage_strength: form.dosageStrength || null,
           dosage_form: form.dosageForm || null,
           category,
+          // Drug Category (Analgesics/Antibiotics/etc.) only applies to
+          // Medical Drugs — Medical Supplies always store null here.
+          drug_category: isSupplyTab ? null : (form.drugCategory || null),
           unit: form.unit || null,
           manufacturer: form.manufacturer || null,
           manufacture_date: form.manufactureDate || null,
@@ -329,6 +380,9 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
                   // leftover Strips/Box value so it can't silently carry
                   // over from a previous Medical Drugs entry.
                   stripsPerBox: nextCategory === 'supply' ? '' : form.stripsPerBox,
+                  // Drug Category only applies to Medical Drugs — clear it
+                  // when switching to supplies so it can't silently carry over.
+                  drugCategory: nextCategory === 'supply' ? '' : form.drugCategory,
                 })
               }}
               style={{ width: '100%', boxSizing: 'border-box', padding: '9px 12px', borderRadius: T.radiusSm, border: `1.5px solid ${bdr}`, fontSize: 13, background: card, color: txt, outline: 'none' }}
@@ -337,6 +391,27 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
               <option value="supply">Medical Supplies</option>
             </select>
           </div>
+
+          {/* Drug Category — clinical classification (Analgesics, Antibiotics,
+              etc.). Only shown for Medical Drugs; Medical Supplies never
+              have this concept. */}
+          {!isSupplyTab && (
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 800, color: txt2, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 5 }}>
+                Drug Category
+              </label>
+              <select
+                value={form.drugCategory}
+                onChange={e => setForm({ ...form, drugCategory: e.target.value })}
+                style={{ width: '100%', boxSizing: 'border-box', padding: '9px 12px', borderRadius: T.radiusSm, border: `1.5px solid ${bdr}`, fontSize: 13, background: card, color: txt, outline: 'none' }}
+              >
+                <option value="">— Select category —</option>
+                {DRUG_CATEGORIES.map(c => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Generic + Brand name */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -519,28 +594,69 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
             </div>
           </div>
 
-          {/* Boxes / Strips per box / Pcs per strip — negative numbers blocked.
-              Medical Supplies never have a strip breakdown, so that field is
-              only shown for Medical Drugs: supplies get just Boxes + Pcs/Box
-              (piecesPerStrip doubling as "pieces per box" via
-              effectiveStripsPerBox = 1). Drugs keep all three fields, with
-              Strips/Box optional (leave blank if the item isn't divided into
-              strips). This is the only stock breakdown the DB supports —
-              there's no loose-strip / loose-piece tracking outside of full
-              boxes. */}
-          <div style={{ display: 'grid', gridTemplateColumns: isSupplyTab ? '1fr 1fr' : '1fr 1fr 1fr', gap: 12 }}>
+          {/* Stock quantity — the shape of this section depends on how the
+              item is actually packaged (packagingMode):
+              - 'quantity' (Bottle, Tube, Pre-filled Syringe, Drops, Syrup,
+                Suspension, Ointment, Vaccine, Injection): no real "box" in
+                real life — a single plain Quantity field.
+              - 'box' (Vial, Ampules, Carpules, Nebules, and all Medical
+                Supplies): items that DO usually arrive boxed, but never
+                have a "strip" in between — Boxes + Pcs/Box.
+              - 'strip' (Tablet, Capsule, and anything else — the default):
+                the full Boxes / Strips-per-box / Pcs-per-strip breakdown,
+                since those really do come in blister strips inside boxes. */}
+          {packagingMode === 'quantity' ? (
             <div>
-              <label style={{ fontSize: 11, fontWeight: 800, color: txt2, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 5 }}>Boxes</label>
-              <input type="number" min={0} step={1} placeholder="e.g. 12"
-                value={form.boxes}
-                onChange={e => setForm({ ...form, boxes: sanitizeNonNegativeInt(e.target.value) })}
+              <label style={{ fontSize: 11, fontWeight: 800, color: txt2, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 5 }}>
+                Quantity ({form.unit.trim() || 'Bottles / Units'})
+              </label>
+              <input type="number" min={0} step={1} placeholder="e.g. 400"
+                value={form.piecesPerStrip}
+                onChange={e => setForm({ ...form, piecesPerStrip: sanitizeNonNegativeInt(e.target.value) })}
                 onKeyDown={e => { if (e.key === '-' || e.key === 'e' || e.key === '+') e.preventDefault() }}
                 style={{ width: '100%', boxSizing: 'border-box', padding: '9px 12px', borderRadius: T.radiusSm, border: `1.5px solid ${bdr}`, fontSize: 13, background: card, color: txt, outline: 'none', transition: 'border 0.15s' }}
                 onFocus={e => (e.currentTarget.style.borderColor = T.green)}
                 onBlur={e  => (e.currentTarget.style.borderColor = bdr)}
               />
             </div>
-            {!isSupplyTab && (
+          ) : packagingMode === 'box' ? (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 800, color: txt2, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 5 }}>Boxes</label>
+                <input type="number" min={0} step={1} placeholder="e.g. 12"
+                  value={form.boxes}
+                  onChange={e => setForm({ ...form, boxes: sanitizeNonNegativeInt(e.target.value) })}
+                  onKeyDown={e => { if (e.key === '-' || e.key === 'e' || e.key === '+') e.preventDefault() }}
+                  style={{ width: '100%', boxSizing: 'border-box', padding: '9px 12px', borderRadius: T.radiusSm, border: `1.5px solid ${bdr}`, fontSize: 13, background: card, color: txt, outline: 'none', transition: 'border 0.15s' }}
+                  onFocus={e => (e.currentTarget.style.borderColor = T.green)}
+                  onBlur={e  => (e.currentTarget.style.borderColor = bdr)}
+                />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 800, color: txt2, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 5 }}>Pcs / Box</label>
+                <input type="number" min={0} step={1} placeholder="e.g. 25"
+                  value={form.piecesPerStrip}
+                  onChange={e => setForm({ ...form, piecesPerStrip: sanitizeNonNegativeInt(e.target.value) })}
+                  onKeyDown={e => { if (e.key === '-' || e.key === 'e' || e.key === '+') e.preventDefault() }}
+                  style={{ width: '100%', boxSizing: 'border-box', padding: '9px 12px', borderRadius: T.radiusSm, border: `1.5px solid ${bdr}`, fontSize: 13, background: card, color: txt, outline: 'none', transition: 'border 0.15s' }}
+                  onFocus={e => (e.currentTarget.style.borderColor = T.green)}
+                  onBlur={e  => (e.currentTarget.style.borderColor = bdr)}
+                />
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 800, color: txt2, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 5 }}>Boxes</label>
+                <input type="number" min={0} step={1} placeholder="e.g. 12"
+                  value={form.boxes}
+                  onChange={e => setForm({ ...form, boxes: sanitizeNonNegativeInt(e.target.value) })}
+                  onKeyDown={e => { if (e.key === '-' || e.key === 'e' || e.key === '+') e.preventDefault() }}
+                  style={{ width: '100%', boxSizing: 'border-box', padding: '9px 12px', borderRadius: T.radiusSm, border: `1.5px solid ${bdr}`, fontSize: 13, background: card, color: txt, outline: 'none', transition: 'border 0.15s' }}
+                  onFocus={e => (e.currentTarget.style.borderColor = T.green)}
+                  onBlur={e  => (e.currentTarget.style.borderColor = bdr)}
+                />
+              </div>
               <div>
                 <label style={{ fontSize: 11, fontWeight: 800, color: txt2, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 5 }}>Strips / Box</label>
                 <input type="number" min={0} step={1} placeholder="optional — leave blank if 1"
@@ -552,21 +668,19 @@ export default function AddMedicineModal({ show, onClose, onAdded, showToast, ac
                   onBlur={e  => (e.currentTarget.style.borderColor = bdr)}
                 />
               </div>
-            )}
-            <div>
-              <label style={{ fontSize: 11, fontWeight: 800, color: txt2, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 5 }}>
-                {isSupplyTab ? 'Pcs / Box' : 'Pcs / Strip'}
-              </label>
-              <input type="number" min={0} step={1} placeholder={isSupplyTab ? 'e.g. 10' : 'e.g. 10 (or pcs/box if no strips)'}
-                value={form.piecesPerStrip}
-                onChange={e => setForm({ ...form, piecesPerStrip: sanitizeNonNegativeInt(e.target.value) })}
-                onKeyDown={e => { if (e.key === '-' || e.key === 'e' || e.key === '+') e.preventDefault() }}
-                style={{ width: '100%', boxSizing: 'border-box', padding: '9px 12px', borderRadius: T.radiusSm, border: `1.5px solid ${bdr}`, fontSize: 13, background: card, color: txt, outline: 'none', transition: 'border 0.15s' }}
-                onFocus={e => (e.currentTarget.style.borderColor = T.green)}
-                onBlur={e  => (e.currentTarget.style.borderColor = bdr)}
-              />
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 800, color: txt2, textTransform: 'uppercase', letterSpacing: 0.5, display: 'block', marginBottom: 5 }}>Pcs / Strip</label>
+                <input type="number" min={0} step={1} placeholder="e.g. 10 (or pcs/box if no strips)"
+                  value={form.piecesPerStrip}
+                  onChange={e => setForm({ ...form, piecesPerStrip: sanitizeNonNegativeInt(e.target.value) })}
+                  onKeyDown={e => { if (e.key === '-' || e.key === 'e' || e.key === '+') e.preventDefault() }}
+                  style={{ width: '100%', boxSizing: 'border-box', padding: '9px 12px', borderRadius: T.radiusSm, border: `1.5px solid ${bdr}`, fontSize: 13, background: card, color: txt, outline: 'none', transition: 'border 0.15s' }}
+                  onFocus={e => (e.currentTarget.style.borderColor = T.green)}
+                  onBlur={e  => (e.currentTarget.style.borderColor = bdr)}
+                />
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Storage location */}
           <div>

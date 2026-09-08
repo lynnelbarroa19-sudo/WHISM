@@ -71,7 +71,7 @@ if df.empty:
     raise ValueError("Walang laman ang pharmacy_requests table (o lahat 'rejected'). "
                       "I-check ang totoong records sa Supabase.")
 
-df["requested_at"] = pd.to_datetime(df["requested_at"]).dt.tz_localize(None)
+df["requested_at"] = pd.to_datetime(df["requested_at"], format="mixed", utc=True).dt.tz_localize(None)
 df = df.sort_values(["medicine_name", "requested_at"]).reset_index(drop=True)
 
 # I-derive ang date-based features
