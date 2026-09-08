@@ -1,9 +1,6 @@
 'use client'
 import { useState, useEffect, useRef, Suspense } from 'react'
-import { useTheme } from 'next-themes'
 import { useSearchParams, useRouter } from 'next/navigation'
-import Sidebar from '../components/Sidebar'
-import Topbar from '../components/Topbar'
 import StatsCards from '../components/StatsCard'
 import StockLevelCard from '../components/StockLevelCard'
 import DispensedMedicineCard from '../components/DispensedMedicineCard'
@@ -12,7 +9,6 @@ import MedicineMovementAnalytics from '../components/MedicineMovementAnalytics'
 import PredictionCard from '../components/PredictionCard'
 import BarangayDistributionCard from '../components/Barangaydistributioncard'
 import styles from '../components/warehouse.module.css'
-
 
 // useSearchParams() requires a Suspense boundary in the App Router, so the
 // actual page body lives in DashboardInner and this file just wraps it.
@@ -25,18 +21,11 @@ export default function DashboardPage() {
 }
 
 function DashboardInner() {
-  const { theme } = useTheme()
   const searchParams = useSearchParams()
   const router = useRouter()
-  const [mounted, setMounted] = useState(false)
   const [showDispenseModal, setShowDispenseModal] = useState(false)
   const [toast, setToast] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
-
-  const topbarRef = useRef<HTMLDivElement>(null)
-  const [topbarHeight, setTopbarHeight] = useState(0)
-
-  useEffect(() => setMounted(true), [])
 
   // Auto-open the Dispense Medicine modal when navigated here via the
   // Sidebar's "Dispense Medicine" link (/warehouse/dashboard?dispense=1),
@@ -48,24 +37,6 @@ function DashboardInner() {
     }
   }, [searchParams, router])
 
-  useEffect(() => {
-    const measure = () => {
-      if (topbarRef.current) {
-        setTopbarHeight(topbarRef.current.offsetHeight)
-      }
-    }
-    measure()
-
-    const ro = new ResizeObserver(measure)
-    if (topbarRef.current) ro.observe(topbarRef.current)
-    window.addEventListener('resize', measure)
-
-    return () => {
-      ro.disconnect()
-      window.removeEventListener('resize', measure)
-    }
-  }, [])
-
   const handleDispenseSuccess = () => {
     setShowDispenseModal(false)
     setToast('Medicine dispensed successfully!')
@@ -74,95 +45,69 @@ function DashboardInner() {
   }
 
   return (
-    <div className={`${styles.root} ${mounted && theme === 'dark' ? styles.dark : ''}`}>
-      <Sidebar />
-      <div className={styles.mainArea}>
-        <div ref={topbarRef}>
-          <Topbar />
-        </div>
-
-        {/* Fixed-height wrapper — buong page/window hindi na nagsscroll.
-            Height nito = viewport minus Topbar, at hindi na sya sumosobra pababa. */}
+    <>
+      {/* Fixed-height wrapper synced to the shared layout's measured topbar
+          height (--wh-topbar-h) — buong page/window hindi na nagsscroll. */}
+      <div
+        style={{
+          height: 'calc(100vh - var(--wh-topbar-h, 62px))',
+          overflow: 'hidden',
+          display: 'flex',
+          alignItems: 'stretch',
+          padding: '20px',
+          boxSizing: 'border-box',
+        }}
+      >
         <div
           style={{
-            height: topbarHeight ? `calc(100vh - ${topbarHeight}px)` : '100vh',
-            overflow: 'hidden',
-            display: 'flex',
-            alignItems: 'stretch',
-            padding: '20px',
-            boxSizing: 'border-box',
+            flex: 1,
+            height: '100%',
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            paddingRight: 4,
           }}
         >
-
-          {/* Buong page ngayon — Pharmacy Requests card ay inalis na dito,
-              nasa sarili na itong "Requests" page (Sidebar nav item). */}
-          <div
-            style={{
-              flex: 1,
-              height: '100%',
-              overflowY: 'auto',
-              overflowX: 'hidden',
-              paddingRight: 4,
-            }}
-          >
-
-            {/* Page header — title lang na ngayon; ang "Dispense Medicine" action
-                ay pumunta na sa Sidebar bilang permanent nav item, kaya inalis na
-                dito yung button (walang duplicate entry point). */}
-            <div style={{ marginBottom: 22 }}>
-              <p className={styles.pageEyebrow} style={{ letterSpacing: '0.12em', marginBottom: 4 }}>Warehouse</p>
-              <h1 className={styles.pageTitle} style={{ fontSize: 36, lineHeight: 1.1, letterSpacing: '0.01em', color: '#0d3b1f', fontWeight: 1000 }}>DASHBOARD</h1>
-            </div>
-
-            {/* Clean 2x2 layout sa gitna: kaliwang column (Expiring Soon /
-                Medicine Movement) at kanang column (Dispensed Medicine /
-                Stock Levels) — parehong magkatapat na cards ay magkapareho
-                ng height (380px sa parehong row), kaya magkapantay
-                silang apat. Note: "movement" ay hiwalay na gridArea sa
-                "expiring" (dating dahilan ng overlap ng "(3)" badge).
-
-                "prediction" -- ISANG column na lang ito (hindi na
-                "prediction prediction"), kaya kasing-lapad ito ng Medicine
-                Movement/Stock Levels sa halip na buong-lapad ng dalawang
-                column. Ang katabing cell ay bakante muna ("."). */}
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr 1fr',
-                gridTemplateRows: 'auto 380px 380px 380px',
-                gridTemplateAreas: `
-                  "analytics  analytics"
-                  "expiring   dispensed"
-                  "movement   stock"
-                  "prediction barangay"
-                `,
-                gap: 18,
-              }}
-            >
-              <StatsCards key={`stats-${refreshKey}`} />
-
-              <div style={{ gridArea: 'movement', height: '100%', overflow: 'hidden' }}>
-                <MedicineMovementAnalytics key={`movement-${refreshKey}`} />
-              </div>
-
-              <div style={{ gridArea: 'stock', height: '100%', overflow: 'hidden' }}>
-                <StockLevelCard key={`stock-${refreshKey}`} />
-              </div>
-
-              <div style={{ gridArea: 'dispensed', height: '100%', overflow: 'hidden' }}>
-                <DispensedMedicineCard key={`dispensed-${refreshKey}`} />
-              </div>
-
-              <div style={{ gridArea: 'prediction', height: '100%', overflow: 'hidden' }}>
-                <PredictionCard key={`prediction-${refreshKey}`} />
-              </div>
-
-              <div style={{ gridArea: 'barangay', height: '100%', overflow: 'hidden' }}>
-                <BarangayDistributionCard key={`barangay-${refreshKey}`} />
-              </div>
-            </div>
+          <div style={{ marginBottom: 22 }}>
+            <p className={styles.pageEyebrow} style={{ letterSpacing: '0.12em', marginBottom: 4 }}>Warehouse</p>
+            <h1 className={styles.pageTitle} style={{ fontSize: 36, lineHeight: 1.1, letterSpacing: '0.01em', color: 'var(--text)', fontWeight: 1000 }}>DASHBOARD</h1>
           </div>
 
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gridTemplateRows: 'auto 380px 380px 380px',
+              gridTemplateAreas: `
+                "analytics  analytics"
+                "expiring   dispensed"
+                "movement   stock"
+                "prediction barangay"
+              `,
+              gap: 18,
+            }}
+          >
+            <StatsCards key={`stats-${refreshKey}`} />
+
+            <div style={{ gridArea: 'movement', height: '100%', overflow: 'hidden' }}>
+              <MedicineMovementAnalytics key={`movement-${refreshKey}`} />
+            </div>
+
+            <div style={{ gridArea: 'stock', height: '100%', overflow: 'hidden' }}>
+              <StockLevelCard key={`stock-${refreshKey}`} />
+            </div>
+
+            <div style={{ gridArea: 'dispensed', height: '100%', overflow: 'hidden' }}>
+              <DispensedMedicineCard key={`dispensed-${refreshKey}`} />
+            </div>
+
+            <div style={{ gridArea: 'prediction', height: '100%', overflow: 'hidden' }}>
+              <PredictionCard key={`prediction-${refreshKey}`} />
+            </div>
+
+            <div style={{ gridArea: 'barangay', height: '100%', overflow: 'hidden' }}>
+              <BarangayDistributionCard key={`barangay-${refreshKey}`} />
+            </div>
+          </div>
         </div>
       </div>
 
@@ -185,6 +130,6 @@ function DashboardInner() {
           <span style={{ fontSize: 14 }}>✓</span> {toast}
         </div>
       )}
-    </div>
+    </>
   )
 }

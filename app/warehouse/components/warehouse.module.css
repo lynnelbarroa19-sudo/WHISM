@@ -47,7 +47,7 @@
   display: flex;
   height: 100vh;
   overflow: hidden;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
@@ -130,7 +130,7 @@
   color: var(--text2);
   font-size: 13px;
   font-weight: 500;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   text-align: left;
   cursor: pointer;
   transition: background .15s, color .15s;
@@ -227,7 +227,7 @@
   border: none;
   color: #fff;
   font-size: 13px;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   outline: none;
   flex: 1;
 }
@@ -274,7 +274,7 @@
   cursor: pointer;
   transition: background .15s;
   text-align: left;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
 }
 .searchDropItem:hover { background: var(--green-light); }
 .searchDropItemName { font-size: 13px; font-weight: 500; color: var(--text); }
@@ -293,7 +293,7 @@
   color: var(--green);
   font-size: 13px;
   font-weight: 600;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: background .15s;
 }
@@ -398,7 +398,7 @@
   background: transparent;
   cursor: pointer;
   transition: background .15s;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
 }
 .notifItem:hover { background: var(--green-light); }
 .notifItemTop {
@@ -462,7 +462,7 @@
   font-size: 12px;
   cursor: pointer;
   transition: background .15s;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   border-top: 1px solid var(--border);
 }
 .profileClose:hover { background: var(--green-light); color: var(--green); }
@@ -612,7 +612,7 @@
   border-radius: 20px;
   border: none;
   cursor: pointer;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   transition: all .15s;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -668,7 +668,7 @@
   border: 1px solid var(--border);
   font-size: 12px;
   font-weight: 600;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: all .15s;
   background: var(--surface2);
@@ -706,7 +706,7 @@
   color: #fff;
   font-size: 13px;
   font-weight: 600;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: all .18s;
   box-shadow: 0 4px 14px rgba(13,59,31,.3);
@@ -743,7 +743,7 @@
   color: var(--text2);
   cursor: pointer;
   user-select: none;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
 }
 .checkLabel input { accent-color: var(--green); }
 .archiveBtn {
@@ -753,7 +753,7 @@
   font-size: 12px;
   border: none;
   background: transparent;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   transition: color .15s;
   padding: 0;
 }
@@ -823,7 +823,7 @@
   background: transparent;
   color: var(--text);
   font-size: 13px;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: background .15s;
   text-align: left;
@@ -864,7 +864,7 @@
   background: transparent;
   border: none;
   cursor: pointer;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   font-weight: 500;
   transition: color .15s;
   padding: 0;
@@ -956,7 +956,7 @@
   font-size: 13px;
   color: var(--text);
   outline: none;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   transition: border-color .15s;
   box-sizing: border-box;
 }
@@ -982,7 +982,7 @@
   color: #ef4444;
   font-size: 13px;
   font-weight: 700;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: background .15s;
 }
@@ -996,7 +996,7 @@
   color: #fff;
   font-size: 13px;
   font-weight: 700;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: background .15s;
 }
@@ -1010,7 +1010,7 @@
   color: #fff;
   font-size: 13px;
   font-weight: 700;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: background .15s;
 }
@@ -1024,7 +1024,7 @@
   color: var(--green);
   font-size: 13px;
   font-weight: 700;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: background .15s;
 }
@@ -1118,7 +1118,7 @@
   color: var(--text);
   outline: none;
   background: var(--surface2);
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   transition: border-color .15s;
   box-sizing: border-box;
 }
@@ -1200,7 +1200,7 @@
   color: rgba(255,255,255,0.7);
   font-size: 13px;
   font-weight: 500;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: all .15s;
   width: 100%;
@@ -1254,7 +1254,7 @@
   color: var(--text2);
   font-size: 12px;
   font-weight: 500;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: background .15s;
 }
@@ -1272,7 +1272,7 @@
   color: var(--text);
   background: var(--surface);
   outline: none;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   transition: border-color .15s;
 }
 .formInput:focus { border-color: var(--green); }
@@ -1286,7 +1286,7 @@
   color: #fff;
   font-size: 13px;
   font-weight: 700;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: all .18s;
   box-shadow: 0 4px 14px rgba(13,59,31,.3);
@@ -1313,7 +1313,7 @@
   font-size: 13px;
   color: var(--text);
   outline: none;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   transition: border-color .15s;
   box-sizing: border-box;
 }
@@ -1345,7 +1345,7 @@
   color: #fff;
   font-size: 13px;
   font-weight: 700;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: all .18s;
 }
@@ -1356,7 +1356,7 @@
   display: flex;
   height: 100vh;
   width: 100vw;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
 }
 .authLeft { width: 50%; position: relative; overflow: hidden; }
 .authLeftOverlay {
@@ -1411,7 +1411,7 @@
   font-size: 13px;
   color: #111827;
   outline: none;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   transition: border-color .15s;
   box-sizing: border-box;
 }
@@ -1452,7 +1452,7 @@
   background: none;
   border: none;
   cursor: pointer;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
 }
 .authForgot:hover { text-decoration: underline; }
 .authError {
@@ -1473,7 +1473,7 @@
   color: #fff;
   font-size: 13px;
   font-weight: 700;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   cursor: pointer;
   transition: background .15s;
   letter-spacing: .04em;
@@ -1491,7 +1491,7 @@
   background: none;
   border: none;
   cursor: pointer;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   width: 100%;
 }
 .authBack:hover { text-decoration: underline; }
@@ -1510,7 +1510,7 @@
   width: 100%;
   cursor: pointer;
   transition: all .18s;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   margin-bottom: 12px;
 }
 .accessBtn:hover { background: var(--green-mid); transform: translateY(-1px); }
@@ -1573,7 +1573,7 @@
   cursor: pointer;
   padding: 10px 20px;
   border-radius: 10px 10px 0 0;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
   transition: background .15s, color .15s;
   color: var(--text3);
 }
@@ -1769,7 +1769,7 @@
   font-weight: 700;
   cursor: pointer;
   transition: background .15s, color .15s;
-  font-family: "DM Sans", sans-serif;
+  font-family: 'Nunito', sans-serif;
 }
 .predRefreshBtn:hover:not(:disabled) { background: var(--green-light); }
 .predRefreshBtn:disabled { cursor: default; opacity: .65; }

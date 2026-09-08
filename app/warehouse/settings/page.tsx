@@ -1,40 +1,39 @@
 'use client'
 import { useState, useEffect, useRef, CSSProperties, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { useTheme } from 'next-themes'
-import Sidebar from '../components/Sidebar'
-import Topbar from '../components/Topbar'
 import { User, Lock, Eye, EyeOff, Upload, Camera, Check, X, Loader2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import styles from '../components/warehouse.module.css'
 
 type SettingsTab = 'profile' | 'password'
 
-function getStoredUserId(): string | null {
-  if (typeof window === 'undefined') return null
-  const direct = localStorage.getItem('userId')
-  if (direct) return direct
-  try {
-    const raw = localStorage.getItem('smartrhu_user')
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      if (parsed?.id) return parsed.id
-      if (parsed?.user_id) return parsed.user_id
-    }
-  } catch {}
-  return null
+// NOTE: previously this page sourced userId from a localStorage cache
+// (getStoredUserId), set once at login. If that cached value ever drifted
+// from the real authenticated session — stale cache, different login flow,
+// manual localStorage edits, etc. — every update here would silently fail
+// RLS, because the "users" table's UPDATE policy checks auth.uid() = user_id,
+// and .eq('user_id', uid) was filtering on the wrong id. Pulling the id
+// directly from the live Supabase session (same source the RLS check itself
+// uses) removes that whole class of mismatch, the same way the pharmacist
+// side's useAuth() context does under the hood.
+async function getSessionUserId(): Promise<string | null> {
+  const { data: { session } } = await supabase.auth.getSession()
+  return session?.user?.id ?? null
 }
 
 function SettingsPageInner() {
-  const { theme } = useTheme()
   const searchParams = useSearchParams()
-  const [mounted, setMounted] = useState(false)
   const [activeTab, setActiveTab] = useState<SettingsTab>('profile')
-  const [photo, setPhoto] = useState<string | null>(
-    typeof window !== 'undefined' ? localStorage.getItem('userAvatar') : null
-  )
-  const [username, setUsername] = useState('')
+  const [photo, setPhoto] = useState<string | null>(null)
+  // ── Profile fields — first_name / last_name / role are the REAL columns
+  //    on public.users (there is no `username` column; see Topbar.tsx's
+  //    fetchProfile, which already reads these correctly). The previous
+  //    version of this page queried a `username` column that doesn't
+  //    exist, so profile saves here were silently going nowhere.
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName] = useState('')
   const [email, setEmail] = useState('')
+  const [role, setRole] = useState('warehouse')
   const [saving, setSaving] = useState(false)
 
   const [currentPassword, setCurrentPassword] = useState('')
@@ -49,10 +48,6 @@ function SettingsPageInner() {
   const [toastType, setToastType] = useState<'success' | 'error'>('success')
   const [uploading, setUploading] = useState(false)
   const [showCamera, setShowCamera] = useState(false)
-
-  // ── Captured photo waiting for confirmation ──
-  const [capturedBlob, setCapturedBlob] = useState<Blob | null>(null)
-  const [capturedPreview, setCapturedPreview] = useState<string | null>(null)
 
   const fileRef = useRef<HTMLInputElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -69,9 +64,15 @@ function SettingsPageInner() {
   }
 
   useEffect(() => {
-    setMounted(true)
-    const id = getStoredUserId()
-    setUserId(id)
+    // Seed from the localStorage cache once mounted (client-side only) so
+    // the server-rendered HTML and the client's first render both start
+    // from the same "no photo yet" state — reading localStorage inside
+    // useState's initializer, like before, made the server always render
+    // the initials placeholder while the client instantly rendered the
+    // cached <img>, which is exactly what triggers a hydration mismatch.
+    const cachedAvatar = localStorage.getItem('userAvatar')
+    if (cachedAvatar) setPhoto(cachedAvatar)
+    getSessionUserId().then(setUserId)
   }, [])
 
   // Read the ?tab= query param so the profile dropdown can deep-link to either tab
@@ -87,22 +88,25 @@ function SettingsPageInner() {
   }, [userId])
 
   useEffect(() => {
-    return () => {
-      streamRef.current?.getTracks().forEach(t => t.stop())
-      if (capturedPreview) URL.revokeObjectURL(capturedPreview)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => { streamRef.current?.getTracks().forEach(t => t.stop()) }
   }, [])
 
   const fetchProfile = async (uid: string) => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('users')
-      .select('username, email, avatar_url')
+      .select('first_name, last_name, email, avatar_url, role')
       .eq('user_id', uid)
       .single()
+    if (error) {
+      console.error('[Settings] fetchProfile:', error.message, '| code:', error.code, '| details:', error.details, '| hint:', error.hint)
+      showToast('Failed to load profile.', 'error')
+      return
+    }
     if (data) {
-      setUsername(data.username || '')
+      setFirstName(data.first_name || '')
+      setLastName(data.last_name || '')
       setEmail(data.email || '')
+      setRole(data.role || 'warehouse')
       if (data.avatar_url) setPhoto(`${data.avatar_url}?t=${Date.now()}`)
     }
   }
@@ -115,7 +119,10 @@ function SettingsPageInner() {
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (!file || !userId) return
+    if (!file) return
+    if (!userId) { showToast('User not found. Please refresh.', 'error'); return }
+    if (file.size > 5 * 1024 * 1024) { showToast('File too large. Max 5 MB.', 'error'); return }
+
     setPhoto(URL.createObjectURL(file))
     setUploading(true)
     try {
@@ -124,12 +131,25 @@ function SettingsPageInner() {
       const { error: uploadError } = await supabase.storage
         .from('avatars').upload(filePath, file, { upsert: true })
       if (uploadError) { showToast(`Error: ${uploadError.message}`, 'error'); setUploading(false); return }
+
       const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(filePath)
-      const { error: updateError } = await supabase
-        .from('users').update({ avatar_url: urlData.publicUrl }).eq('user_id', userId)
-      if (updateError) { showToast(`Error saving photo: ${updateError.message}`, 'error'); setUploading(false); return }
-      setPhoto(`${urlData.publicUrl}?t=${Date.now()}`)
-      localStorage.setItem('userAvatar', urlData.publicUrl)
+      const publicUrl = urlData.publicUrl
+      const displayUrl = `${publicUrl}?t=${Date.now()}`
+
+      const { data: updData, error: updateError } = await supabase
+        .from('users').update({ avatar_url: publicUrl }).eq('user_id', userId).select()
+      if (updateError) {
+        console.error('[Settings] handlePhotoUpload update:', updateError.message, '| code:', updateError.code, '| details:', updateError.details, '| hint:', updateError.hint)
+        showToast(`Error saving photo: ${updateError.message}`, 'error'); setUploading(false); return
+      }
+      if (!updData || updData.length === 0) {
+        console.error('[Settings] handlePhotoUpload: update matched 0 rows — likely RLS blocking this specific update.')
+        showToast("Photo saved to storage but couldn't link it to your profile (permission issue).", 'error')
+        setUploading(false); return
+      }
+
+      setPhoto(displayUrl)
+      localStorage.setItem('userAvatar', publicUrl)
       window.dispatchEvent(new Event('avatarUpdated'))
       showToast('Photo updated successfully!', 'success')
     } catch { showToast('Something went wrong!', 'error') }
@@ -149,78 +169,84 @@ function SettingsPageInner() {
     }
   }
 
-  // Closes the whole modal (Cancel / X) — discards everything
   const stopCamera = () => {
     streamRef.current?.getTracks().forEach(t => t.stop())
     streamRef.current = null
-    if (capturedPreview) URL.revokeObjectURL(capturedPreview)
-    setCapturedBlob(null)
-    setCapturedPreview(null)
     setShowCamera(false)
   }
 
-  // Step 1: just capture a preview, do NOT upload yet
   const capturePhoto = () => {
-    if (!videoRef.current || !canvasRef.current) return
+    if (!videoRef.current || !canvasRef.current || !userId) return
     const canvas = canvasRef.current
     canvas.width = videoRef.current.videoWidth
     canvas.height = videoRef.current.videoHeight
     canvas.getContext('2d')?.drawImage(videoRef.current, 0, 0)
-    canvas.toBlob((blob) => {
+    canvas.toBlob(async (blob) => {
       if (!blob) return
-      setCapturedBlob(blob)
-      setCapturedPreview(URL.createObjectURL(blob))
-      // pause the live feed while reviewing the shot
-      streamRef.current?.getTracks().forEach(t => t.stop())
-      streamRef.current = null
+      setUploading(true); stopCamera()
+      const filePath = `${userId}/avatar.jpg`
+      const { error: uploadError } = await supabase.storage
+        .from('avatars').upload(filePath, blob, { upsert: true, contentType: 'image/jpeg' })
+      if (uploadError) { showToast(`Error: ${uploadError.message}`, 'error'); setUploading(false); return }
+      const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(filePath)
+      const publicUrl = urlData.publicUrl
+      const displayUrl = `${publicUrl}?t=${Date.now()}`
+      const { data: updData, error: updateError } = await supabase
+        .from('users').update({ avatar_url: publicUrl }).eq('user_id', userId).select()
+      if (updateError) {
+        console.error('[Settings] capturePhoto update:', updateError.message, '| code:', updateError.code, '| details:', updateError.details, '| hint:', updateError.hint)
+        showToast(`Error saving photo: ${updateError.message}`, 'error'); setUploading(false); return
+      }
+      if (!updData || updData.length === 0) {
+        console.error('[Settings] capturePhoto: update matched 0 rows — likely RLS blocking this specific update.')
+        showToast("Photo saved to storage but couldn't link it to your profile (permission issue).", 'error')
+        setUploading(false); return
+      }
+      setPhoto(displayUrl)
+      localStorage.setItem('userAvatar', publicUrl)
+      window.dispatchEvent(new Event('avatarUpdated'))
+      showToast('Photo saved!', 'success')
+      setUploading(false)
     }, 'image/jpeg', 0.9)
   }
 
-  // "Retake" — discard the preview, restart the live camera
-  const retakePhoto = async () => {
-    if (capturedPreview) URL.revokeObjectURL(capturedPreview)
-    setCapturedBlob(null)
-    setCapturedPreview(null)
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true })
-      streamRef.current = stream
-      if (videoRef.current) videoRef.current.srcObject = stream
-    } catch {
-      showToast('Camera access denied.', 'error')
-      setShowCamera(false)
-    }
-  }
-
-  // "Use This Photo" — only now does it actually upload + save
-  const confirmCapturedPhoto = async () => {
-    if (!capturedBlob || !userId) return
-    setUploading(true)
-    const filePath = `${userId}/avatar.jpg`
-    const { error: uploadError } = await supabase.storage
-      .from('avatars').upload(filePath, capturedBlob, { upsert: true, contentType: 'image/jpeg' })
-    if (uploadError) { showToast(`Error: ${uploadError.message}`, 'error'); setUploading(false); return }
-    const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(filePath)
-    const { error: updateError } = await supabase
-      .from('users').update({ avatar_url: urlData.publicUrl }).eq('user_id', userId)
-    if (updateError) { showToast('Error saving photo.', 'error'); setUploading(false); return }
-    setPhoto(`${urlData.publicUrl}?t=${Date.now()}`)
-    localStorage.setItem('userAvatar', urlData.publicUrl)
-    window.dispatchEvent(new Event('avatarUpdated'))
-    showToast('Photo saved successfully!', 'success')
-    setUploading(false)
-    stopCamera()
-  }
-
   const handleSaveProfile = async () => {
-    if (!username || !email) { showToast('Please fill in all fields.', 'error'); return }
-    if (!userId) return
+    if (!firstName.trim()) { showToast('Please enter a first name.', 'error'); return }
+    if (!lastName.trim()) { showToast('Please enter a last name.', 'error'); return }
+    if (!email.trim()) { showToast('Please enter an email.', 'error'); return }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast('Please enter a valid email.', 'error'); return }
+    if (!userId) { showToast('User not found. Please refresh.', 'error'); return }
+
+    // ── TEMP DEBUG — remove once the RLS issue is confirmed/fixed.
+    //    Compare these two values against what you saw in the SQL editor:
+    //    sessionUid should equal one of the auth_uid values from Query 1,
+    //    and userId (state) should equal that same row's public_user_id.
+    const { data: { session: debugSession } } = await supabase.auth.getSession()
+    console.log('[DEBUG] session.user.id  =', debugSession?.user?.id)
+    console.log('[DEBUG] session.user.email =', debugSession?.user?.email)
+    console.log('[DEBUG] userId (state)    =', userId)
+    console.log('[DEBUG] email (form field)=', email)
+
     setSaving(true)
-    const { error } = await supabase
-      .from('users').update({ username, email }).eq('user_id', userId)
+    const { data, error } = await supabase.from('users').update({
+      first_name: firstName.trim(),
+      last_name: lastName.trim(),
+      email: email.trim(),
+    }).eq('user_id', userId).select()
     setSaving(false)
-    if (error) { showToast('Error saving profile!', 'error'); return }
-    localStorage.setItem('userName', username)
-    localStorage.setItem('userEmail', email)
+
+    if (error) {
+      console.error('[Settings] handleSaveProfile:', error.message, '| code:', error.code, '| details:', error.details, '| hint:', error.hint)
+      showToast(error.message || 'Error saving profile!', 'error')
+      return
+    }
+    if (!data || data.length === 0) {
+      console.error('[Settings] handleSaveProfile: update matched 0 rows — likely blocked by a Row Level Security policy on "users" for UPDATE.')
+      showToast('Save didn\'t actually apply — you may not have permission to edit this record (RLS).', 'error')
+      return
+    }
+    localStorage.setItem('userName', [firstName.trim(), lastName.trim()].filter(Boolean).join(' '))
+    localStorage.setItem('userEmail', email.trim())
     window.dispatchEvent(new Event('profileUpdated'))
     showToast('Profile saved successfully!', 'success')
   }
@@ -231,9 +257,10 @@ function SettingsPageInner() {
     if (!req.special) { showToast('Password must have a special character.', 'error'); return }
     if (!req.number)  { showToast('Password must have a number.', 'error'); return }
     if (!req.match)   { showToast('Passwords do not match.', 'error'); return }
-    const userEmail = localStorage.getItem('userEmail') || ''
+    if (newPassword === currentPassword) { showToast('New password must differ from current.', 'error'); return }
+
     setPwSaving(true)
-    const { error: signInError } = await supabase.auth.signInWithPassword({ email: userEmail, password: currentPassword })
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password: currentPassword })
     if (signInError) { showToast('Current password is incorrect.', 'error'); setPwSaving(false); return }
     const { error: updateError } = await supabase.auth.updateUser({ password: newPassword })
     setPwSaving(false)
@@ -272,19 +299,18 @@ function SettingsPageInner() {
     marginBottom: 4,
   })
 
-  const initials = (username || 'U').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)
+  const fullName = [firstName, lastName].filter(Boolean).join(' ').trim()
+  const initials = (fullName || 'U').split(' ').filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2) || 'U'
+  const roleLabel = role ? role.charAt(0).toUpperCase() + role.slice(1) : 'Warehouse'
 
   return (
-    <div className={`${styles.root} ${mounted && theme === 'dark' ? styles.dark : ''}`}>
-      <Sidebar />
-      <div className={styles.mainArea}>
-        <Topbar />
-        <div className={styles.content}>
+    <>
+    <div className={styles.content}>
 
           {/* Page heading */}
           <div style={{ marginBottom: 24 }}>
             <p className={styles.pageEyebrow}>Warehouse</p>
-            <h1 className={styles.pageTitle} style={{ marginBottom: 4 }}>Settings</h1>
+            <h1 className={styles.pageTitle} style={{ marginBottom: 4 }}>SETTINGS</h1>
             <p style={{ fontSize: 12, color: 'var(--text3)', margin: 0 }}>{dateStr}</p>
           </div>
 
@@ -323,9 +349,9 @@ function SettingsPageInner() {
                 </div>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {username || 'Staff'}
+                    {fullName || 'Warehouse Staff'}
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--text3)' }}>Warehouse Staff</div>
+                  <div style={{ fontSize: 11, color: 'var(--text3)' }}>{roleLabel}</div>
                 </div>
               </div>
 
@@ -359,7 +385,7 @@ function SettingsPageInner() {
                     </div>
 
                     {/* Photo section */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 32 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 32, flexWrap: 'wrap' }}>
                       <div style={{ position: 'relative', flexShrink: 0 }}>
                         <div style={{ width: 90, height: 90, borderRadius: '50%',
                           overflow: 'hidden', border: '3px solid var(--green)',
@@ -413,19 +439,30 @@ function SettingsPageInner() {
                     </div>
 
                     {/* Fields */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px 24px', marginBottom: 32 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px 24px', marginBottom: 20 }}>
                       <div>
-                        <label style={labelStyle}>Username</label>
-                        <input type="text" value={username} onChange={e => setUsername(e.target.value)} placeholder="Enter username" style={inputStyle}
+                        <label style={labelStyle}>First Name</label>
+                        <input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} placeholder="Enter first name" style={inputStyle} autoComplete="off"
+                          onFocus={e => (e.currentTarget.style.borderColor = 'var(--green)')}
+                          onBlur={e => (e.currentTarget.style.borderColor = 'var(--border)')} />
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Last Name</label>
+                        <input type="text" value={lastName} onChange={e => setLastName(e.target.value)} placeholder="Enter last name" style={inputStyle} autoComplete="off"
                           onFocus={e => (e.currentTarget.style.borderColor = 'var(--green)')}
                           onBlur={e => (e.currentTarget.style.borderColor = 'var(--border)')} />
                       </div>
                       <div>
                         <label style={labelStyle}>Email</label>
-                        <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Enter email" style={inputStyle}
+                        <input type="text" value={email} onChange={e => setEmail(e.target.value)} placeholder="Enter email" style={inputStyle} autoComplete="off"
                           onFocus={e => (e.currentTarget.style.borderColor = 'var(--green)')}
                           onBlur={e => (e.currentTarget.style.borderColor = 'var(--border)')} />
                       </div>
+                    </div>
+
+                    <div style={{ marginBottom: 32 }}>
+                      <label style={labelStyle}>Role</label>
+                      <input type="text" value={roleLabel} readOnly style={{ ...inputStyle, background: 'var(--surface2)', color: 'var(--text3)', cursor: 'not-allowed' }} />
                     </div>
 
                     <button type="button" onClick={handleSaveProfile} disabled={saving} style={{
@@ -544,7 +581,6 @@ function SettingsPageInner() {
             </div>
           </div>
         </div>
-      </div>
 
       {/* ── Camera modal ── */}
       {showCamera && (
@@ -552,52 +588,26 @@ function SettingsPageInner() {
           <div style={{ background: 'var(--surface)', borderRadius: 18, width: '100%', maxWidth: 480, overflow: 'hidden', boxShadow: '0 24px 64px rgba(0,0,0,.28)' }}>
             <div style={{ background: 'linear-gradient(90deg, var(--green-dark), var(--green))', padding: '16px 22px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <span style={{ color: '#fff', fontWeight: 700, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Camera size={16} /> {capturedPreview ? 'Review Photo' : 'Take Photo'}
+                <Camera size={16} /> Take Photo
               </span>
               <button type="button" onClick={stopCamera} style={{ border: 'none', background: 'rgba(255,255,255,.2)', color: '#fff', width: 28, height: 28, borderRadius: 7, cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <X size={13} />
               </button>
             </div>
             <div style={{ padding: 16 }}>
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                style={{ width: '100%', borderRadius: 10, background: '#000', display: capturedPreview ? 'none' : 'block' }}
-              />
-              {capturedPreview && (
-                <img src={capturedPreview} alt="Captured preview" style={{ width: '100%', borderRadius: 10, display: 'block' }} />
-              )}
+              <video ref={videoRef} autoPlay playsInline style={{ width: '100%', borderRadius: 10, background: '#000', display: 'block' }} />
               <canvas ref={canvasRef} style={{ display: 'none' }} />
-              {capturedPreview && (
-                <p style={{ fontSize: 12, color: 'var(--text3)', textAlign: 'center', marginTop: 10, marginBottom: 0 }}>
-                  Sigurado ka ba na ito ang gusto mong gamiting profile photo?
-                </p>
-              )}
             </div>
             <div style={{ padding: '12px 22px', display: 'flex', justifyContent: 'flex-end', gap: 10, borderTop: '1px solid var(--border)' }}>
-              {capturedPreview ? (
-                <>
-                  <button type="button" onClick={retakePhoto} disabled={uploading} style={{ background: 'var(--surface2)', color: 'var(--text)', border: 'none', borderRadius: 20, padding: '8px 20px', fontSize: 13, fontWeight: 600, cursor: uploading ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>
-                    Retake
-                  </button>
-                  <button type="button" onClick={confirmCapturedPhoto} disabled={uploading} style={{ background: 'var(--green)', color: '#fff', border: 'none', borderRadius: 20, padding: '8px 22px', fontSize: 13, fontWeight: 600, cursor: uploading ? 'not-allowed' : 'pointer', fontFamily: 'inherit', opacity: uploading ? 0.7 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    {uploading
-                      ? <><Loader2 size={13} style={{ animation: 'whSpin 0.8s linear infinite' }} /> Saving…</>
-                      : <><Check size={13} /> Use This Photo</>
-                    }
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button type="button" onClick={stopCamera} style={{ background: 'var(--surface2)', color: 'var(--text)', border: 'none', borderRadius: 20, padding: '8px 20px', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
-                    Cancel
-                  </button>
-                  <button type="button" onClick={capturePhoto} style={{ background: 'var(--green)', color: '#fff', border: 'none', borderRadius: 20, padding: '8px 22px', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <Camera size={13} /> Capture
-                  </button>
-                </>
-              )}
+              <button type="button" onClick={stopCamera} style={{ background: 'var(--surface2)', color: 'var(--text)', border: 'none', borderRadius: 20, padding: '8px 20px', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
+                Cancel
+              </button>
+              <button type="button" onClick={capturePhoto} disabled={uploading} style={{ background: 'var(--green)', color: '#fff', border: 'none', borderRadius: 20, padding: '8px 22px', fontSize: 13, fontWeight: 600, cursor: uploading ? 'not-allowed' : 'pointer', fontFamily: 'inherit', opacity: uploading ? 0.7 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>
+                {uploading
+                  ? <><Loader2 size={13} style={{ animation: 'whSpin 0.8s linear infinite' }} /> Saving…</>
+                  : <><Camera size={13} /> Capture</>
+                }
+              </button>
             </div>
           </div>
         </div>
@@ -613,6 +623,7 @@ function SettingsPageInner() {
           boxShadow: '0 8px 24px rgba(0,0,0,.18)',
           display: 'flex', alignItems: 'center', gap: 8,
           animation: 'whSlideUp 0.25s ease',
+          maxWidth: 'calc(100vw - 40px)',
         }}>
           {toastType === 'success' ? <Check size={14} /> : <X size={14} />}
           {toast}
@@ -623,7 +634,7 @@ function SettingsPageInner() {
         @keyframes whSpin    { to { transform: rotate(360deg); } }
         @keyframes whSlideUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
       `}</style>
-    </div>
+    </>
   )
 }
 
