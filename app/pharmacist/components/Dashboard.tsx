@@ -156,36 +156,42 @@ function LegendChip({ color, label, count }: { color: string; label: string; cou
   );
 }
 
-/* Flat stat tile — replaces the old gradient card. Same four figures
-   (Dispensed Today / Total Items / Drugs / Supplies), just restyled to the
-   clean white-card-with-accent-icon look used throughout the reference. */
+/* Stat tile — green gradient card matching the Analytics header cards
+   (Total Medicine / LGU / PhilHealth / Department of Health): dark-to-
+   bright green sweep, white label/value/sub text, large faint icon
+   anchored bottom-right. `accent` is unused now (kept optional so call
+   sites don't need to change) — the whole card carries the green, not
+   just the icon badge. */
 function StatTile({ label, value, sub, icon, accent, loading }: {
-  label: string; value: React.ReactNode; sub: string; icon: React.ReactElement; accent: string; loading?: boolean;
+  label: string; value: React.ReactNode; sub: string; icon: React.ReactElement; accent?: string; loading?: boolean;
 }) {
   const { t } = useTheme();
   return (
     <div style={{
-      background: t.cardBg, borderRadius: 14, border: `1px solid ${t.cardBorder}`,
-      padding: "16px 18px", boxShadow: "0 1px 6px rgba(0,0,0,0.05)",
+      background: `linear-gradient(135deg, ${t.green} 0%, ${t.greenLight ?? t.green} 100%)`,
+      borderRadius: 14, padding: "16px 18px", boxShadow: `0 6px 18px ${t.green}33`,
       display: "flex", flexDirection: "column", gap: 8, minHeight: 108,
+      position: "relative", overflow: "hidden",
     }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontSize: 10.5, fontWeight: 800, color: t.text3, textTransform: "uppercase", letterSpacing: 0.6 }}>
-          {label}
-        </span>
-        <span style={{
-          width: 30, height: 30, borderRadius: 9, background: `${accent}1a`, color: accent,
-          display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-        }}>
-          {icon}
-        </span>
-      </div>
+      <span style={{
+        fontSize: 10.5, fontWeight: 800, color: "rgba(255,255,255,0.85)",
+        textTransform: "uppercase", letterSpacing: 0.6,
+      }}>
+        {label}
+      </span>
       {loading ? (
-        <div style={{ width: 50, height: 26, borderRadius: 6, background: t.surface2, animation: "pulse 1.3s ease-in-out infinite" }} />
+        <div style={{ width: 50, height: 26, borderRadius: 6, background: "rgba(255,255,255,0.25)", animation: "pulse 1.3s ease-in-out infinite" }} />
       ) : (
-        <div style={{ fontSize: 30, fontWeight: 900, color: t.text, lineHeight: 1 }}>{value}</div>
+        <div style={{ fontSize: 30, fontWeight: 900, color: "#fff", lineHeight: 1 }}>{value}</div>
       )}
-      <div style={{ fontSize: 11, color: t.text3 }}>{sub}</div>
+      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.8)" }}>{sub}</div>
+      <span style={{
+        position: "absolute", right: 12, bottom: 10, width: 34, height: 34,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        color: "rgba(255,255,255,0.35)",
+      }}>
+        {icon}
+      </span>
     </div>
   );
 }
@@ -519,14 +525,15 @@ export default function Dashboard({ totalCount }: Props) {
         <div style={{ fontSize: isMobile ? 22 : 30, fontWeight: 900, color: t.text, lineHeight: 1 }}>DASHBOARD</div>
       </div>
 
-      {/* Stat tiles — Dispensed Today, Total Items, Drugs, Supplies. Flat
-          cards with a tinted icon badge; each shows its own skeleton until
-          its underlying fetch resolves, instead of a misleading "0". */}
+      {/* Stat tiles — Dispensed Today, Total Items, Drugs, Supplies. Green
+          gradient cards to match the Analytics header cards; each shows
+          its own skeleton until its underlying fetch resolves, instead of
+          a misleading "0". */}
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4,1fr)", gap: isMobile ? 10 : 14 }}>
-        <StatTile label="Dispensed Today" value={totalDispensedToday} sub="units out today" icon={<CalendarIcon size={16} color={t.green} />} accent={t.green} loading={loadingDispense} />
-        <StatTile label="Total Items" value={medicines.length} sub={`${lowStockCount} low stock`} icon={<BoxIcon size={16} color={t.green} />} accent={t.green} loading={loadingMeds} />
-        <StatTile label="Drugs" value={drugsCount} sub="medicine drugs" icon={<DrugIcon size={16} color={t.green} />} accent={t.green} loading={loadingMeds} />
-        <StatTile label="Supplies" value={suppliesCount} sub="medicine supplies" icon={<SupplyIcon size={16} color={t.green} />} accent={t.green} loading={loadingMeds} />
+        <StatTile label="Dispensed Today" value={totalDispensedToday} sub="units out today" icon={<CalendarIcon size={22} color="#fff" />} loading={loadingDispense} />
+        <StatTile label="Total Items" value={medicines.length} sub={`${lowStockCount} low stock`} icon={<BoxIcon size={24} color="#fff" />} loading={loadingMeds} />
+        <StatTile label="Drugs" value={drugsCount} sub="medicine drugs" icon={<DrugIcon size={24} color="#fff" />} loading={loadingMeds} />
+        <StatTile label="Supplies" value={suppliesCount} sub="medicine supplies" icon={<SupplyIcon size={24} color="#fff" />} loading={loadingMeds} />
       </div>
 
       {/* Expiring Soon + Monthly Dispense Trend */}

@@ -559,7 +559,11 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
 
   return (
     <main style={{ flex: 1, padding: 24, overflowY: "auto", background: t.surface2 }}>
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .guhit-table th, .guhit-table td { border-right: 1px solid ${t.border}; }
+        .guhit-table th:last-child, .guhit-table td:last-child { border-right: none; }
+      `}</style>
 
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 18, flexWrap: "wrap", gap: 12 }}>
@@ -682,7 +686,7 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
       {!showArchived && (
         <div style={{ background: t.cardBg, border: `1px solid ${t.cardBorder}`, borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.05)" }}>
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <table className="guhit-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ background: t.surface2, borderBottom: `2px solid ${t.border}` }}>
                   <th style={{ ...thStyle, width: 60 }}>No.</th>
@@ -777,7 +781,7 @@ export default function MedicineStockPage({ onToast, onMedicineAdded }: Props) {
       {showArchived && (
         <div style={{ background: t.cardBg, border: `1px solid ${t.cardBorder}`, borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.05)" }}>
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <table className="guhit-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ background: t.surface2, borderBottom: `2px solid ${t.border}` }}>
                   {["No.", "Medicine Name", "Dosage/Type", "Unit", "Reason", "Detail", "Quantity", "Date", "Action"].map((h, i) => (

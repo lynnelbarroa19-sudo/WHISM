@@ -36,6 +36,44 @@ function splitIntoBoxPiece(total: number, stripsPerBox: number | null, piecesPer
   return { boxes, loosePieces };
 }
 
+/** Doctors offered in the "Prescribed By" dropdown — matches the names
+ *  seen on the paper logbook (Dr. Paolo, Dr. Macario). Edit this array to
+ *  add/remove doctors; there's no doctors table backing this yet, so it's
+ *  just a plain list for now. */
+const DOCTORS = ["Dr. Paolo", "Dr. Macario"];
+
+/** All barangays of Lopez, Quezon — offered in the "Barangay" dropdown so
+ *  entries are consistent (no typos/variant spellings) instead of free
+ *  text. */
+const BARANGAYS = [
+  "Bacungan", "Bagacay", "Banabahin Ibaba", "Banabahin Ilaya", "Burgos",
+  "Gomez", "Magsaysay", "Talolong", "Bayabas", "Bebito", "Bigajo",
+  "Binahian A", "Binahian B", "Binahian C", "Bocboc", "Buenavista",
+  "Buyacanin", "Cagacag", "Calantipayan", "Canda Ibaba", "Canda Ilaya",
+  "Cawayan", "Cawayanin", "Cogorin Ibaba", "Cogorin Ilaya", "Concepcion",
+  "Danlagan", "De La Paz", "Del Pilar", "Del Rosario", "Esperanza Ibaba",
+  "Esperanza Ilaya", "Guihay", "Guinuangan", "Guites", "Hondagua",
+  "Ilayang Ilog A", "Ilayang Ilog B", "Inalusan", "Jongo", "Lalaguna",
+  "Lourdes", "Mabanban", "Mabini", "Magallanes", "Maguilayan",
+  "Mahayod-Hayod", "Mal-ay", "Mandoog", "Manguisian", "Matinik",
+  "Monteclaro", "Pamampangin", "Pansol", "Peñafrancia", "Pisipis",
+  "Rizal (Rural)", "Roma", "Rosario", "Samat", "San Andres",
+  "San Antonio", "San Francisco A", "San Francisco B", "San Isidro",
+  "San Jose", "San Miguel", "San Pedro", "San Rafael", "San Roque",
+  "Santa Catalina", "Santa Elena", "Santa Jacobe", "Santa Lucia",
+  "Santa Maria", "Santa Rosa", "Santo Niño Ibaba", "Santo Niño Ilaya",
+  "Silang", "Sugod", "Sumalang", "Tan-ag Ibaba", "Tan-ag Ilaya",
+  "Tocalin", "Vegaflor", "Vergaña", "Veronica", "Villa Aurora",
+  "Villa Espina", "Villa Hermosa", "Villa Geda", "Villamonte",
+  "Villanacaob", "Rizal (Poblacion)", "Santa Teresa",
+];
+
+/** The five funding-source columns on the paper logbook (Gen. Fund / Ekon
+ *  / PHO / DOH / Donation). Only one is ever checked per row on the paper,
+ *  so this is a single-select in the app too. */
+const FUND_SOURCES = ["Gen. Fund", "Ekon", "PHO", "DOH", "Donation"] as const;
+type FundSource = typeof FUND_SOURCES[number];
+
 const PillIcon = ({ size = 15, color = "currentColor" }: { size?: number; color?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0 }}>
     <rect x="2" y="9" width="20" height="6" rx="3" stroke={color} strokeWidth="2" fill="none"/>
@@ -77,9 +115,11 @@ async function currentDisplayName(): Promise<string | null> {
  *  prescription-driven) and DispenseItemsModal (manual, multi-item) so the
  *  quantity/expiry validation logic only lives in one place.
  *
- *  THIS PASS: batches now update using the true 3-level cascade — Boxes,
- *  Strips, AND Pieces all shrink correctly as stock depletes, instead of
- *  only Boxes/loose-pieces. */
+ *  Also writes the three paper-logbook fields (barangay, fund_source,
+ *  prescribed_by) onto every log row it creates, when provided — same
+ *  values apply to every medicine in one dispense session, matching how
+ *  the paper log repeats them per medicine line for the same patient
+ *  visit. */
 export async function dispenseFEFO(
   medicineId: string,
   medName: string,
@@ -87,7 +127,10 @@ export async function dispenseFEFO(
   dispensedBy: string | null,
   dispensedByName: string | null,
   recipientName: string,
-  remarks?: string | null
+  remarks?: string | null,
+  barangay?: string | null,
+  fundSource?: string | null,
+  prescribedBy?: string | null
 ) {
   const { data: batches, error } = await supabase
     .from("pharma_medicine_batches")
@@ -117,6 +160,9 @@ export async function dispenseFEFO(
       dispensed_by: dispensedBy, dispensed_by_name: dispensedByName,
       recipient_note: recipientName, dispensed_at: new Date().toISOString(),
       remarks: remarks ?? null,
+      barangay: barangay ?? null,
+      fund_source: fundSource ?? null,
+      prescribed_by: prescribedBy ?? null,
     }]);
     if (logErr) throw logErr;
 
@@ -132,6 +178,11 @@ export async function dispenseFEFO(
    explicitly picks one batch), a prescription can contain several medicines
    at once. Stock is drawn automatically FEFO (earliest expiration_date
    first, across as many batches as needed to cover the requested quantity).
+
+   NOT updated with the new barangay/fund-source/prescribed-by fields in
+   this pass — a prescription's issuing doctor is already implicit in the
+   prescription record itself, and this flow has a different shape (no
+   manual per-item form). Ask if you'd like these added here too.
 ══════════════════════════════════════════════════════════════════════════ */
 type Prescription = {
   id: string;
@@ -380,6 +431,13 @@ export function PrescriptionModal({ onClose, onToast }: PrescriptionModalProps) 
    DispenseItemsModal — pick SEVERAL medicines and quantities, then dispense
    all of them in one go for one patient/recipient. Batch selection is
    automatic (FEFO, via the shared dispenseFEFO() above).
+
+   THIS PASS: added the three paper-logbook fields that apply once per
+   dispense session (same patient/visit) — Barangay (text), Fund Source
+   (single-select pills: Gen. Fund/Ekon/PHO/DOH/Donation, mirroring the
+   paper's checkbox columns), and Prescribed By (dropdown of doctors). All
+   three are required, written onto every pharma_dispense_log row this
+   session creates. No signature field — no equivalent needed digitally.
 ══════════════════════════════════════════════════════════════════════════ */
 type DispenseItemsModalProps = {
   medicines: MedicineStockSummary[]; // already filtered to in-stock only by the caller
@@ -402,6 +460,10 @@ export function DispenseItemsModal({ medicines, onClose, onSaved, onToast }: Dis
   const { user } = useAuth();
 
   const [patientName, setPatientName] = useState("");
+  const [barangay, setBarangay] = useState("");
+  const [showBarangayDropdown, setShowBarangayDropdown] = useState(false);
+  const [fundSource, setFundSource] = useState<FundSource | "">("");
+  const [prescribedBy, setPrescribedBy] = useState("");
   const [items, setItems] = useState<DispenseDraftItem[]>([]);
   const [pickMedicineId, setPickMedicineId] = useState("");
   const [medicineSearch, setMedicineSearch] = useState("");
@@ -503,10 +565,17 @@ export function DispenseItemsModal({ medicines, onClose, onSaved, onToast }: Dis
   };
 
   const nameValid = patientName.trim().length > 0;
-  const canDispense = nameValid && items.length > 0 && items.every(it => it.qty > 0 && it.qty <= it.available);
+  const barangayValid = barangay.trim().length > 0;
+  const fundSourceValid = fundSource !== "";
+  const prescribedByValid = prescribedBy.trim().length > 0;
+  const canDispense = nameValid && barangayValid && fundSourceValid && prescribedByValid
+    && items.length > 0 && items.every(it => it.qty > 0 && it.qty <= it.available);
 
   const handleDispenseAll = async () => {
     if (!nameValid) { onToast("Patient / recipient name is required.", "error"); return; }
+    if (!barangayValid) { onToast("Barangay is required.", "error"); return; }
+    if (!fundSourceValid) { onToast("Please select a fund source.", "error"); return; }
+    if (!prescribedByValid) { onToast("Please select who prescribed this.", "error"); return; }
     if (items.length === 0) { onToast("Add at least one medicine to dispense.", "error"); return; }
     const overLimit = items.find(it => it.qty > it.available);
     if (overLimit) { onToast(`${overLimit.generic_name}: quantity exceeds available stock (${overLimit.available}).`, "error"); return; }
@@ -519,13 +588,16 @@ export function DispenseItemsModal({ medicines, onClose, onSaved, onToast }: Dis
       const recipient = patientName.trim();
 
       for (const it of items) {
-        await dispenseFEFO(it.medicine_id, it.generic_name, it.qty, dispensedBy, dispensedByName, recipient);
+        await dispenseFEFO(
+          it.medicine_id, it.generic_name, it.qty, dispensedBy, dispensedByName, recipient,
+          null, barangay.trim(), fundSource, prescribedBy
+        );
       }
 
       await logAction({
         user_name: dispensedByName || user?.name || "Pharmacist", user_role: "Pharmacist",
         action: "DISPENSE_MULTIPLE", module: "Pharmacy",
-        description: `Dispensed ${items.length} medicine(s) to ${recipient}: ${items.map(it => `${it.generic_name} (${it.displayQty})`).join(", ")}`,
+        description: `Dispensed ${items.length} medicine(s) to ${recipient} (${barangay.trim()}, ${fundSource}, prescribed by ${prescribedBy}): ${items.map(it => `${it.generic_name} (${it.displayQty})`).join(", ")}`,
         status: "success",
       });
 
@@ -564,6 +636,74 @@ export function DispenseItemsModal({ medicines, onClose, onSaved, onToast }: Dis
           <label style={lbl}>Patient / Recipient Name <span style={{ color: "#dc2626" }}>*</span></label>
           <input value={patientName} onChange={e => setPatientName(e.target.value)} placeholder="e.g. Juan Dela Cruz"
             style={{ ...inp, border: `1.5px solid ${!nameValid && patientName.length > 0 ? "#dc2626" : t.inputBorder}` }} />
+
+          <div style={{ marginTop: 12, position: "relative" }}>
+            <label style={lbl}>Barangay <span style={{ color: "#dc2626" }}>*</span></label>
+            <input
+              value={barangay}
+              onChange={e => { setBarangay(e.target.value); setShowBarangayDropdown(true); }}
+              onFocus={() => setShowBarangayDropdown(true)}
+              onBlur={() => setTimeout(() => setShowBarangayDropdown(false), 150)}
+              placeholder="Search or type a barangay…"
+              style={{ ...sel, border: `1.5px solid ${!barangayValid && barangay.length > 0 ? "#dc2626" : t.inputBorder}` }}
+            />
+            {showBarangayDropdown && (() => {
+              const q = barangay.trim().toLowerCase();
+              const matches = q ? BARANGAYS.filter(b => b.toLowerCase().includes(q)) : BARANGAYS;
+              return (
+                <div style={{
+                  position: "absolute", top: "100%", left: 0, right: 0, marginTop: 4, zIndex: 20,
+                  background: t.modalBg, border: `1.5px solid ${t.border2}`, borderRadius: 8,
+                  maxHeight: 200, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+                }}>
+                  {matches.length === 0 ? (
+                    <div style={{ padding: 12, fontSize: 12.5, color: t.text3, fontStyle: "italic", textAlign: "center" }}>No matches</div>
+                  ) : matches.map(b => (
+                    <button
+                      key={b}
+                      type="button"
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => { setBarangay(b); setShowBarangayDropdown(false); }}
+                      style={{
+                        display: "block", width: "100%", textAlign: "left", padding: "8px 12px",
+                        border: "none", borderBottom: `1px solid ${t.border2}`, background: "transparent",
+                        cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, color: t.modalText,
+                      }}
+                      onMouseEnter={e => (e.currentTarget.style.background = t.surface2)}
+                      onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                    >{b}</button>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            <label style={lbl}>Fund Source <span style={{ color: "#dc2626" }}>*</span></label>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {FUND_SOURCES.map(fs => {
+                const active = fundSource === fs;
+                return (
+                  <button key={fs} type="button" onClick={() => setFundSource(fs)} style={{
+                    padding: "6px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 700,
+                    cursor: "pointer", fontFamily: "inherit",
+                    border: `1.5px solid ${active ? t.green : t.inputBorder}`,
+                    background: active ? t.green : "transparent",
+                    color: active ? "#fff" : t.text2,
+                  }}>{active ? "✓ " : ""}{fs}</button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            <label style={lbl}>Prescribed By <span style={{ color: "#dc2626" }}>*</span></label>
+            <select value={prescribedBy} onChange={e => setPrescribedBy(e.target.value)}
+              style={{ ...sel, border: `1.5px solid ${!prescribedByValid && prescribedBy.length === 0 ? t.inputBorder : t.inputBorder}` }}>
+              <option value="">Select doctor…</option>
+              {DOCTORS.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </div>
 
           <div style={{ borderTop: `1px dashed ${t.border2}`, margin: "18px 0" }} />
 
@@ -695,10 +835,11 @@ export function DispenseItemsModal({ medicines, onClose, onSaved, onToast }: Dis
    DispenseMedicineModal — manual, single-batch dispensing.
    Pharmacist picks the exact batch (no auto-FEFO here).
 
-   THIS PASS: the "After Dispense" preview now shows the true 3-level
-   cascade (Full Boxes / Loose Strips / Loose Pcs), computed from the
-   selected batch's actual strips_per_box × pieces_per_strip — matching
-   exactly how the batch will be split in the database after saving.
+   THIS PASS: added the same three paper-logbook fields as
+   DispenseItemsModal (Barangay, Fund Source, Prescribed By) — required,
+   written onto the single log row this modal creates. Also still shows
+   the true 3-level cascade (Full Boxes / Loose Strips / Loose Pcs) preview
+   from before.
 ══════════════════════════════════════════════════════════════════════════ */
 export default function DispenseMedicineModal({ medicine, onClose, onSaved, onToast }: Props) {
   const { t } = useTheme();
@@ -709,6 +850,10 @@ export default function DispenseMedicineModal({ medicine, onClose, onSaved, onTo
   const [boxesToGive, setBoxesToGive] = useState("");
   const [looseToGive, setLooseToGive] = useState("");
   const [patientName, setPatientName] = useState("");
+  const [barangay, setBarangay] = useState("");
+  const [showBarangayDropdown, setShowBarangayDropdown] = useState(false);
+  const [fundSource, setFundSource] = useState<FundSource | "">("");
+  const [prescribedBy, setPrescribedBy] = useState("");
   const [saving, setSaving] = useState(false);
   const { user } = useAuth();
 
@@ -754,7 +899,11 @@ export default function DispenseMedicineModal({ medicine, onClose, onSaved, onTo
     ? splitIntoBoxPiece(Math.max(remaining, 0), selectedBatch.strips_per_box, selectedBatch.pieces_per_strip)
     : { boxes: 0, loosePieces: 0 };
   const nameValid = patientName.trim().length > 0;
-  const canDispense = !!selectedBatch && effectiveQty > 0 && effectiveQty <= totalAvailable && nameValid;
+  const barangayValid = barangay.trim().length > 0;
+  const fundSourceValid = fundSource !== "";
+  const prescribedByValid = prescribedBy.trim().length > 0;
+  const canDispense = !!selectedBatch && effectiveQty > 0 && effectiveQty <= totalAvailable
+    && nameValid && barangayValid && fundSourceValid && prescribedByValid;
 
   const daysUntil = (dateStr: string | null) => {
     if (!dateStr) return Infinity;
@@ -767,6 +916,9 @@ export default function DispenseMedicineModal({ medicine, onClose, onSaved, onTo
   const handleDispense = async () => {
     if (!selectedBatch) { onToast("Select a batch first.", "error"); return; }
     if (!nameValid) { onToast("Patient / recipient name is required.", "error"); return; }
+    if (!barangayValid) { onToast("Barangay is required.", "error"); return; }
+    if (!fundSourceValid) { onToast("Please select a fund source.", "error"); return; }
+    if (!prescribedByValid) { onToast("Please select who prescribed this.", "error"); return; }
     if (!(effectiveQty > 0 && effectiveQty <= totalAvailable)) { onToast(`Quantity must be between 1 and ${totalAvailable}.`, "error"); return; }
 
     setSaving(true);
@@ -781,6 +933,7 @@ export default function DispenseMedicineModal({ medicine, onClose, onSaved, onTo
         batch_id: selectedBatch.batch_id, medicine_id: medicine.medicine_id, quantity: effectiveQty,
         recipient_note: patientName.trim(), dispensed_by: dispensedBy, dispensed_by_name: dispensedByName,
         dispensed_at: new Date().toISOString(),
+        barangay: barangay.trim(), fund_source: fundSource, prescribed_by: prescribedBy,
       }]);
       if (dispErr) throw dispErr;
 
@@ -801,7 +954,7 @@ export default function DispenseMedicineModal({ medicine, onClose, onSaved, onTo
         user_role: "Pharmacist",
         action: "DISPENSE_MEDICINE",
         module: "Pharmacy",
-        description: `Dispensed ${qtyLabel} of ${medicine.generic_name} to ${patientName.trim()} (batch ${selectedBatch.batch_number || selectedBatch.batch_id.slice(0, 8)})`,
+        description: `Dispensed ${qtyLabel} of ${medicine.generic_name} to ${patientName.trim()} (batch ${selectedBatch.batch_number || selectedBatch.batch_id.slice(0, 8)}, ${barangay.trim()}, ${fundSource}, prescribed by ${prescribedBy})`,
         status: "success",
       });
 
@@ -817,6 +970,15 @@ export default function DispenseMedicineModal({ medicine, onClose, onSaved, onTo
     border: `1.5px solid ${t.inputBorder}`, borderRadius: 8, padding: "8px 10px", fontSize: 16,
     fontFamily: "inherit", outline: "none", background: t.modalBg, color: t.modalText,
     width: "100%", height: 40, boxSizing: "border-box", textAlign: "center", fontWeight: 700,
+  };
+  const textInp: CSSProperties = {
+    border: `1.5px solid ${t.inputBorder}`, borderRadius: 8, padding: "8px 10px", fontSize: 13,
+    fontFamily: "inherit", outline: "none", background: t.modalBg, color: t.modalText,
+    width: "100%", height: 38, boxSizing: "border-box",
+  };
+  const lbl2: CSSProperties = {
+    fontSize: 11, fontWeight: 700, color: t.text3, textTransform: "uppercase",
+    letterSpacing: "0.06em", display: "block", marginBottom: 8,
   };
 
   const StatCard = ({ label, value, color }: { label: string; value: string | number; color: string }) => (
@@ -845,15 +1007,86 @@ export default function DispenseMedicineModal({ medicine, onClose, onSaved, onTo
         </div>
 
         {/* Patient / recipient — required, this is the primary column in the history table */}
-        <div style={{ marginBottom: 18 }}>
-          <label style={{ fontSize: 11, fontWeight: 700, color: t.text3, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 8 }}>
+        <div style={{ marginBottom: 14 }}>
+          <label style={lbl2}>
             Patient / Recipient Name <span style={{ color: "#dc2626" }}>*</span>
           </label>
           <input value={patientName} onChange={e => setPatientName(e.target.value)} placeholder="e.g. Juan Dela Cruz"
-            style={{ ...inp, textAlign: "left", fontWeight: 500, fontSize: 13, height: 38, border: `1.5px solid ${!nameValid && patientName.length > 0 ? "#dc2626" : t.inputBorder}` }} />
+            style={{ ...textInp, border: `1.5px solid ${!nameValid && patientName.length > 0 ? "#dc2626" : t.inputBorder}` }} />
           {!nameValid && patientName.length === 0 && (
             <div style={{ fontSize: 10.5, color: t.text3, marginTop: 4 }}>Required — who is this being dispensed to?</div>
           )}
+        </div>
+
+        {/* Barangay — searchable/typeable combobox, same pattern as the medicine field below */}
+        <div style={{ marginBottom: 14, position: "relative" }}>
+          <label style={lbl2}>Barangay <span style={{ color: "#dc2626" }}>*</span></label>
+          <input
+            value={barangay}
+            onChange={e => { setBarangay(e.target.value); setShowBarangayDropdown(true); }}
+            onFocus={() => setShowBarangayDropdown(true)}
+            onBlur={() => setTimeout(() => setShowBarangayDropdown(false), 150)}
+            placeholder="Search or type a barangay…"
+            style={{ ...textInp, border: `1.5px solid ${!barangayValid && barangay.length > 0 ? "#dc2626" : t.inputBorder}` }}
+          />
+          {showBarangayDropdown && (() => {
+            const q = barangay.trim().toLowerCase();
+            const matches = q ? BARANGAYS.filter(b => b.toLowerCase().includes(q)) : BARANGAYS;
+            return (
+              <div style={{
+                position: "absolute", top: "100%", left: 0, right: 0, marginTop: 4, zIndex: 20,
+                background: t.modalBg, border: `1.5px solid ${t.border2}`, borderRadius: 8,
+                maxHeight: 200, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+              }}>
+                {matches.length === 0 ? (
+                  <div style={{ padding: 12, fontSize: 12.5, color: t.text3, fontStyle: "italic", textAlign: "center" }}>No matches</div>
+                ) : matches.map(b => (
+                  <button
+                    key={b}
+                    type="button"
+                    onMouseDown={e => e.preventDefault()}
+                    onClick={() => { setBarangay(b); setShowBarangayDropdown(false); }}
+                    style={{
+                      display: "block", width: "100%", textAlign: "left", padding: "8px 12px",
+                      border: "none", borderBottom: `1px solid ${t.border2}`, background: "transparent",
+                      cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, color: t.modalText,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = t.surface2)}
+                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                  >{b}</button>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+
+        {/* Fund Source — single-select pills, mirrors the paper's checkbox columns */}
+        <div style={{ marginBottom: 14 }}>
+          <label style={lbl2}>Fund Source <span style={{ color: "#dc2626" }}>*</span></label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {FUND_SOURCES.map(fs => {
+              const active = fundSource === fs;
+              return (
+                <button key={fs} type="button" onClick={() => setFundSource(fs)} style={{
+                  padding: "6px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 700,
+                  cursor: "pointer", fontFamily: "inherit",
+                  border: `1.5px solid ${active ? t.green : t.inputBorder}`,
+                  background: active ? t.green : "transparent",
+                  color: active ? "#fff" : t.text2,
+                }}>{active ? "✓ " : ""}{fs}</button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Prescribed By — dropdown of doctors */}
+        <div style={{ marginBottom: 18 }}>
+          <label style={lbl2}>Prescribed By <span style={{ color: "#dc2626" }}>*</span></label>
+          <select value={prescribedBy} onChange={e => setPrescribedBy(e.target.value)}
+            style={{ ...textInp, appearance: "none", WebkitAppearance: "none", cursor: "pointer" }}>
+            <option value="">Select doctor…</option>
+            {DOCTORS.map(d => <option key={d} value={d}>{d}</option>)}
+          </select>
         </div>
 
         {/* ── Batch picker ── */}
