@@ -22,6 +22,18 @@ function displayUnit(unit: string | null | undefined): string {
   return isBoxUnit(unit) ? "pcs" : (unit || "pcs");
 }
 
+/** The five funding-source columns from the paper logbook — same list
+ *  used by the dispense modals' single-select pills. Kept short/abbreviated
+ *  here since they render as narrow table columns, matching how compact
+ *  they are on the paper form. */
+const FUND_SOURCE_COLUMNS: { key: string; label: string }[] = [
+  { key: "Gen. Fund", label: "GEN.\nFUND" },
+  { key: "Ekon", label: "EKON" },
+  { key: "PHO", label: "PHO" },
+  { key: "DOH", label: "DOH" },
+  { key: "Donation", label: "DONATION" },
+];
+
 type DispenseHistoryRow = {
   dispense_id: string;
   quantity: number;
@@ -31,6 +43,9 @@ type DispenseHistoryRow = {
   remarks: string | null;
   generic_name: string;
   unit: string | null;
+  barangay: string | null;
+  fund_source: string | null;
+  prescribed_by: string | null;
 };
 
 /** Groups individual dispense_log rows that belong to the same "session" —
@@ -43,6 +58,9 @@ type DispenseGroup = {
   recipient: string;
   dispensed_at: string;
   dispensed_by_name: string | null;
+  barangay: string | null;
+  fund_source: string | null;
+  prescribed_by: string | null;
   items: DispenseHistoryRow[];
 };
 
@@ -53,7 +71,9 @@ function groupDispenseHistory(rows: DispenseHistoryRow[]): DispenseGroup[] {
     if (!map.has(key)) {
       map.set(key, {
         key, recipient: r.recipient_note || "—", dispensed_at: r.dispensed_at,
-        dispensed_by_name: r.dispensed_by_name, items: [],
+        dispensed_by_name: r.dispensed_by_name,
+        barangay: r.barangay, fund_source: r.fund_source, prescribed_by: r.prescribed_by,
+        items: [],
       });
     }
     map.get(key)!.items.push(r);
@@ -82,19 +102,13 @@ function groupDispenseHistory(rows: DispenseHistoryRow[]): DispenseGroup[] {
   return Array.from(map.values());
 }
 
-type DateFilter = "all" | "today" | "week" | "month";
-
-function withinDateFilter(iso: string, filter: DateFilter): boolean {
-  if (filter === "all") return true;
+function withinDateFilter(iso: string, selectedDate: string): boolean {
+  if (!selectedDate) return true;
+  // <input type="date"> gives "YYYY-MM-DD" in the user's local time zone;
+  // compare against the local calendar date of dispensed_at the same way.
   const d = new Date(iso);
-  const now = new Date();
-  if (filter === "today") return d.toDateString() === now.toDateString();
-  if (filter === "week") {
-    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    return d >= weekAgo;
-  }
-  if (filter === "month") return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
-  return true;
+  const localYmd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return localYmd === selectedDate;
 }
 
 async function exportHistoryToExcel(groups: DispenseGroup[]) {
@@ -110,6 +124,9 @@ async function exportHistoryToExcel(groups: DispenseGroup[]) {
         "Medicine": it.generic_name,
         "Quantity": it.quantity,
         "Unit": displayUnit(it.unit),
+        "Barangay": ii === 0 ? (g.barangay || "") : "",
+        "Fund Source": ii === 0 ? (g.fund_source || "") : "",
+        "Prescribed By": ii === 0 ? (g.prescribed_by || "") : "",
         "Dispensed By": ii === 0 ? (g.dispensed_by_name || "Unknown") : "",
       });
     });
@@ -127,7 +144,7 @@ export default function DispenseMedicinePage({ onToast }: Props) {
   const [history, setHistory] = useState<DispenseHistoryRow[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [search, setSearch] = useState("");
-  const [dateFilter, setDateFilter] = useState<DateFilter>("all");
+  const [selectedDate, setSelectedDate] = useState("");
 
   const fetchMedicines = useCallback(async () => {
     try {
@@ -143,7 +160,7 @@ export default function DispenseMedicinePage({ onToast }: Props) {
     try {
       const { data, error } = await supabase
         .from("pharma_dispense_log")
-        .select("dispense_id, quantity, dispensed_at, recipient_note, dispensed_by_name, remarks, pharma_medicines(generic_name, unit)")
+        .select("dispense_id, quantity, dispensed_at, recipient_note, dispensed_by_name, remarks, barangay, fund_source, prescribed_by, pharma_medicines(generic_name, unit)")
         .order("dispensed_at", { ascending: false })
         .limit(200);
       if (error) throw error;
@@ -152,6 +169,9 @@ export default function DispenseMedicinePage({ onToast }: Props) {
         recipient_note: r.recipient_note, dispensed_by_name: r.dispensed_by_name, remarks: r.remarks,
         generic_name: r.pharma_medicines?.generic_name ?? "Unknown",
         unit: r.pharma_medicines?.unit ?? null,
+        barangay: r.barangay ?? null,
+        fund_source: r.fund_source ?? null,
+        prescribed_by: r.prescribed_by ?? null,
       })));
     } catch (err: any) {
       onToast(err.message || "Failed to load dispense history.", "error");
@@ -164,15 +184,16 @@ export default function DispenseMedicinePage({ onToast }: Props) {
   const refreshAll = () => { fetchMedicines(); fetchHistory(); };
 
   const filteredHistory = useMemo(() => history.filter(h =>
-    withinDateFilter(h.dispensed_at, dateFilter)
+    withinDateFilter(h.dispensed_at, selectedDate)
     && (!search
       || (h.recipient_note ?? "").toLowerCase().includes(search.toLowerCase())
-      || h.generic_name.toLowerCase().includes(search.toLowerCase()))
-  ), [history, search, dateFilter]);
+      || h.generic_name.toLowerCase().includes(search.toLowerCase())
+      || (h.barangay ?? "").toLowerCase().includes(search.toLowerCase()))
+  ), [history, search, selectedDate]);
 
   const dispenseGroups = useMemo(() => groupDispenseHistory(filteredHistory), [filteredHistory]);
-  const activeFilterCount = (dateFilter !== "all" ? 1 : 0) + (search.trim() ? 1 : 0);
-  const clearFilters = () => { setSearch(""); setDateFilter("all"); };
+  const activeFilterCount = (selectedDate ? 1 : 0) + (search.trim() ? 1 : 0);
+  const clearFilters = () => { setSearch(""); setSelectedDate(""); };
 
   const card: CSSProperties = {
     background: t.cardBg, border: `1px solid ${t.cardBorder}`, borderRadius: 14,
@@ -181,8 +202,19 @@ export default function DispenseMedicinePage({ onToast }: Props) {
   const thStyle: CSSProperties = {
     padding: "12px 14px", textAlign: "left", fontWeight: 800, color: t.green,
     fontSize: 10, textTransform: "uppercase", letterSpacing: 0.8, whiteSpace: "nowrap",
+    borderRight: `1px solid ${t.border}`,
   };
-  const tdStyle: CSSProperties = { padding: "11px 14px", fontSize: 12.5, color: t.text2 };
+  // Narrow, centered header style for the five fund-source check columns —
+  // "liitin ang column" — these are much narrower than the other columns
+  // and just hold a checkmark, mirroring the paper log's compact layout.
+  // Widened slightly from the first pass so "DONATION" fits on one line
+  // instead of hyphen-wrapping.
+  const thFundStyle: CSSProperties = {
+    ...thStyle, textAlign: "center", width: 56, whiteSpace: "pre-line",
+    fontSize: 8.5, lineHeight: 1.2, padding: "8px 4px",
+  };
+  const tdStyle: CSSProperties = { padding: "11px 14px", fontSize: 12.5, color: t.text2, borderRight: `1px solid ${t.border}` };
+  const tdFundStyle: CSSProperties = { padding: "11px 4px", fontSize: 13, color: t.green, textAlign: "center", fontWeight: 900, borderRight: `1px solid ${t.border}` };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -210,7 +242,7 @@ export default function DispenseMedicinePage({ onToast }: Props) {
           </span>
           <input
             value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Search…"
+            placeholder="Search name, medicine, or barangay…"
             style={{
               width: "100%", boxSizing: "border-box", padding: "9px 34px 9px 32px",
               borderRadius: 8, border: `1.5px solid ${t.border}`, fontSize: 12.5,
@@ -224,16 +256,16 @@ export default function DispenseMedicinePage({ onToast }: Props) {
           )}
         </div>
 
-        <select value={dateFilter} onChange={e => setDateFilter(e.target.value as DateFilter)} style={{
-          padding: "9px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700,
-          border: `1.5px solid ${t.border}`, background: t.surface2, color: t.text,
-          cursor: "pointer", fontFamily: "inherit",
-        }}>
-          <option value="all">All Time</option>
-          <option value="today">Today</option>
-          <option value="week">Last 7 Days</option>
-          <option value="month">This Month</option>
-        </select>
+        <input
+          type="date"
+          value={selectedDate}
+          onChange={e => setSelectedDate(e.target.value)}
+          style={{
+            padding: "9px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700,
+            border: `1.5px solid ${t.border}`, background: t.surface2, color: t.text,
+            cursor: "pointer", fontFamily: "inherit",
+          }}
+        />
 
         {activeFilterCount > 0 && (
           <button onClick={clearFilters} style={{ border: "none", background: "transparent", color: "#dc2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
@@ -256,7 +288,10 @@ export default function DispenseMedicinePage({ onToast }: Props) {
         </button>
       </div>
 
-      {/* Dispense history — the primary content of this page */}
+      {/* Dispense history — the primary content of this page. Columns now
+          mirror the paper logbook: Date / Name / Medicine / Quantity /
+          Barangay / five narrow fund-source check columns / Prescribed By
+          / Dispensed By. No signature column — no digital equivalent. */}
       <div style={card}>
         <div style={{ background: t.green, padding: "10px 16px", color: "#fff", fontSize: 11.5, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span>Dispense History</span>
@@ -271,19 +306,24 @@ export default function DispenseMedicinePage({ onToast }: Props) {
                 <th style={thStyle}>Name</th>
                 <th style={thStyle}>Medicine</th>
                 <th style={{ ...thStyle, textAlign: "right" }}>Quantity</th>
-                <th style={thStyle}>Dispensed By</th>
+                <th style={thStyle}>Barangay</th>
+                {FUND_SOURCE_COLUMNS.map(fc => (
+                  <th key={fc.key} style={thFundStyle}>{fc.label}</th>
+                ))}
+                <th style={thStyle}>Prescribed By</th>
+                <th style={{ ...thStyle, borderRight: "none" }}>Dispensed By</th>
               </tr>
             </thead>
             <tbody>
               {loadingHistory ? (
-                <tr><td colSpan={6} style={{ textAlign: "center", padding: 48, color: t.text2 }}>
+                <tr><td colSpan={11} style={{ textAlign: "center", padding: 48, color: t.text2 }}>
                   <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
                     <div style={{ width: 28, height: 28, border: `3px solid ${t.green}`, borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
                     Loading history…
                   </div>
                 </td></tr>
               ) : dispenseGroups.length === 0 ? (
-                <tr><td colSpan={6} style={{ textAlign: "center", padding: 48, color: t.text2, fontStyle: "italic" }}>
+                <tr><td colSpan={11} style={{ textAlign: "center", padding: 48, color: t.text2, fontStyle: "italic" }}>
                   {history.length === 0 ? "No medicines dispensed yet." : "No records match your filters."}
                 </td></tr>
               ) : dispenseGroups.map((g, gi) => g.items.map((h, ii) => (
@@ -310,9 +350,22 @@ export default function DispenseMedicinePage({ onToast }: Props) {
                     {h.quantity} <span style={{ fontSize: 10.5, fontWeight: 700, color: t.text3, textTransform: "lowercase" }}>{displayUnit(h.unit)}</span>
                   </td>
                   {ii === 0 && (
-                    <td rowSpan={g.items.length} style={{ ...tdStyle, verticalAlign: "top" }}>
-                      {g.dispensed_by_name || <span style={{ color: t.text3, fontStyle: "italic" }}>Unknown</span>}
-                    </td>
+                    <>
+                      <td rowSpan={g.items.length} style={{ ...tdStyle, verticalAlign: "top" }}>
+                        {g.barangay || <span style={{ color: t.text3, fontStyle: "italic" }}>—</span>}
+                      </td>
+                      {FUND_SOURCE_COLUMNS.map(fc => (
+                        <td key={fc.key} rowSpan={g.items.length} style={{ ...tdFundStyle, verticalAlign: "top" }}>
+                          {g.fund_source === fc.key ? "✓" : ""}
+                        </td>
+                      ))}
+                      <td rowSpan={g.items.length} style={{ ...tdStyle, verticalAlign: "top" }}>
+                        {g.prescribed_by || <span style={{ color: t.text3, fontStyle: "italic" }}>—</span>}
+                      </td>
+                      <td rowSpan={g.items.length} style={{ ...tdStyle, verticalAlign: "top", borderRight: "none" }}>
+                        {g.dispensed_by_name || <span style={{ color: t.text3, fontStyle: "italic" }}>Unknown</span>}
+                      </td>
+                    </>
                   )}
                 </tr>
               )))}

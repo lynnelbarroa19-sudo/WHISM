@@ -5,6 +5,7 @@
 
 .page {
   display: flex;
+  flex-wrap: nowrap;
   height: 100vh;
   overflow: hidden;
   font-family: "DM Sans", sans-serif;
@@ -13,20 +14,26 @@
 /* ── Left hero panel ── */
 .hero {
   flex: 0 0 50%;
+  min-width: 0;
   position: relative;
   overflow: hidden;
   height: 100vh;
+  /* Fallback color only — just shows briefly if /login.jpg fails to
+     load, since heroBg below covers the full panel now. */
+  background: #0d3b1f;
 }
 .heroBg {
   position: absolute;
   inset: 0;
-  background: url("/doctor.jpg") center/cover no-repeat;
-  filter: brightness(0.55);
+  background: url("/login.jpg") center / cover no-repeat;
+  filter: brightness(0.95) saturate(0.7);
 }
 .heroOverlay {
   position: absolute;
   inset: 0;
-  background: linear-gradient(135deg, rgba(13,59,31,0.75) 0%, rgba(22,163,74,0.55) 100%);
+  /* Flat, uniform tint across the whole photo — no gradient, no fade,
+     just an even green wash top to bottom, matching the reference look. */
+  background: rgba(22, 163, 74, 0.45);
 }
 .heroContent {
   position: relative;
@@ -39,7 +46,7 @@
 }
 .heroWelcome {
   font-family: "DM Sans", sans-serif;
-  font-size: 55px;
+  font-size: clamp(22px, 4.2vw, 55px);
   font-weight: 550;
   color: rgba(255,255,255,0.9);
   line-height: 1.1;
@@ -47,15 +54,15 @@
 }
 .heroTitle {
   font-family: "Syne", sans-serif;
-  font-size: 55px;
+  font-size: clamp(24px, 4.2vw, 55px);
   font-weight: 700;
   letter-spacing: -0.01em;
   line-height: 1;
   margin-bottom: 12px;
 }
-.heroTitle span { color: #4ade80; }
+.heroTitle span { color: #0d3b1f; }
 .heroSub {
-  font-size: 30px;
+  font-size: clamp(14px, 2.2vw, 30px);
   color: rgba(255,255,255,0.65);
   letter-spacing: 0.06em;
 }

@@ -1,12 +1,12 @@
 "use client";
-import { CSSProperties, useEffect, useState } from "react";
+import { CSSProperties, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import {
   useTheme,
   MEDICINE_TYPES, SUPPLY_TYPES, UNITS,
 } from "../lib/pharmacy";
 import { submitRestockRequest } from "../lib/pharmacyData";
-import { Search, X } from "lucide-react";
+import { Search, X, Download, Printer } from "lucide-react";
 
 type Props = {
   onToast: (msg: string, type: "success" | "error") => void;
@@ -16,6 +16,14 @@ const DARK_GREEN = "#14532d";
 type ItemCategory = "drugs" | "supplies";
 type RequestStatus = "pending" | "confirm" | "alerted" | "rejected" | "received";
 type StatusFilter = "all" | RequestStatus;
+
+/** "SOURCE OF MEDICINE" columns from the paper logbook — Gen. Fund / Ekon
+ *  / PHO / DOH. Only one is ever checked per row on the paper, so this is
+ *  a single-select in the app too. (No "Donation" column on this
+ *  particular log, unlike the pharmacy dispense log's version.) */
+const FUND_SOURCES = ["Gen. Fund", "Ekon", "PHO", "DOH"] as const;
+type FundSource = typeof FUND_SOURCES[number];
+type SourceFilter = "all" | FundSource;
 
 const STATUS_MAP: Record<RequestStatus, { bg: string; color: string; border: string; label: string }> = {
   pending:  { bg: "#fef9c3", color: "#854d0e", border: "#fde047", label: "Pending"   },
@@ -37,7 +45,16 @@ function StatusPill({ status }: { status: RequestStatus }) {
 
 /** One row from pharmacy_requests, matching Warehouse's exact shape.
  *  `medicine_name` doubles as "Generic Name" for drugs and "Name" for
- *  supplies; `brand_name` is drugs-only and null for supplies. */
+ *  supplies; `brand_name` is drugs-only and null for supplies.
+ *
+ *  batch_lot_no / expiration_date / fund_source are the three paper-
+ *  logbook fields ("LOT NO./BATCH NO.", "EXPIRATION DATE", "SOURCE OF
+ *  MEDICINE"), set by Warehouse when it fulfills the request — never by
+ *  the pharmacist at request time. fulfilled_qty is how PARTIAL
+ *  fulfillment is tracked: if Warehouse only had 50 of the 100 requested,
+ *  fulfilled_qty holds that 50 once the pharmacist confirms receipt (see
+ *  the "Mark as Received" flow below), while requested_qty keeps the
+ *  original ask for comparison. */
 type PharmacyRequestRow = {
   id: string;
   medicine_name: string;
@@ -55,11 +72,22 @@ type PharmacyRequestRow = {
   fulfilled_qty: number | null;
   request_batch_id: string | null;
   confirmed_at: string | null;
+  batch_lot_no: string | null;
+  expiration_date: string | null;
+  fund_source: FundSource | null;
 };
 
 /** Draft/list-item shape used only inside the New Request form.
  *  `brand` is only meaningful (and only shown) for drugs; it's carried
- *  along as an empty string for supplies and ignored on submit. */
+ *  along as an empty string for supplies and ignored on submit.
+ *
+ *  batchLotNo / expirationDate / fundSource are no longer collected from
+ *  the pharmacist at request time — Warehouse assigns the actual lot,
+ *  expiry, and funding source when it fulfills the request (those values
+ *  land in the same-named DB columns via the fulfillment flow, not here).
+ *  The fields stay on the type as always-empty strings so the rest of
+ *  the file (submit payload shape, history table, etc.) doesn't need to
+ *  branch on their absence. */
 type ItemDraft = {
   medicine: string; // Generic Name (drugs) / Name (supplies)
   brand: string;    // Brand Name — drugs only
@@ -68,6 +96,9 @@ type ItemDraft = {
   unit: string;
   qty: number;
   category: ItemCategory;
+  batchLotNo: string;
+  expirationDate: string; // "" or "YYYY-MM-DD"
+  fundSource: FundSource | "";
 };
 
 /** Groups pharmacy_requests rows into one "session" per submission.
@@ -105,8 +136,36 @@ function fmtDate(iso: string) {
 function fmtTime(iso: string) {
   return new Date(iso).toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" });
 }
+function fmtDateOnly(isoDate: string) {
+  // expiration_date comes back as a plain "YYYY-MM-DD" date (no time
+  // component) — parse it as local, not UTC, so it never shifts a day.
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return new Date(y, (m ?? 1) - 1, d ?? 1).toLocaleDateString("en-PH", { year: "numeric", month: "short", day: "numeric" });
+}
+/** Exact-date filter for the Date column — same pattern used on the
+ *  Dispense Medicine page's history filter. Empty selectedDate means "no
+ *  date filter applied". */
+function withinSelectedDate(iso: string, selectedDate: string): boolean {
+  if (!selectedDate) return true;
+  const d = new Date(iso);
+  const localYmd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return localYmd === selectedDate;
+}
+/** Requested vs. actually-fulfilled quantity, as a display string.
+ *  Once an item is 'received', fulfilled_qty is the real delivered
+ *  count — if Warehouse sent less than asked, this reads "50/100 Pieces"
+ *  instead of silently showing the original 100 as if it all arrived. */
+function qtyDisplay(it: PharmacyRequestRow): string {
+  if (it.status === "received" && it.fulfilled_qty != null && it.fulfilled_qty < it.requested_qty) {
+    return `${it.fulfilled_qty}/${it.requested_qty} ${it.unit}`;
+  }
+  return `${it.requested_qty} ${it.unit}`;
+}
 
-const EMPTY_DRAFT: ItemDraft = { medicine: "", brand: "", dosage: "", type: "", unit: "Pieces", qty: 1, category: "drugs" };
+const EMPTY_DRAFT: ItemDraft = {
+  medicine: "", brand: "", dosage: "", type: "", unit: "Pieces", qty: 1, category: "drugs",
+  batchLotNo: "", expirationDate: "", fundSource: "",
+};
 
 type SuggestReason = "low_stock" | "expiring" | "frequent";
 type SuggestedItem = { name: string; reason: SuggestReason };
@@ -117,12 +176,88 @@ const REASON_LABEL: Record<SuggestReason, { label: string; bg: string; color: st
   frequent:  { label: "Frequently requested", bg: "#dbeafe", color: "#1d4ed8" },
 };
 
+/** Exports the currently-filtered request batches to an .xlsx file — one
+ *  row per medicine line (matching the paper logbook's one-row-per-
+ *  medicine layout), with the batch-level fields (Date, Requested By)
+ *  repeated on the first row of each batch only, same convention as the
+ *  Dispense Medicine page's export. */
+async function exportRequestsToExcel(batches: RequestBatch[]) {
+  const XLSX = await import("xlsx");
+  const rows: Record<string, string | number>[] = [];
+  batches.forEach((b, bi) => {
+    b.items.forEach((it, ii) => {
+      rows.push({
+        "#": ii === 0 ? bi + 1 : "",
+        "Date": ii === 0 ? fmtDate(b.requested_at) : "",
+        "Time": ii === 0 ? fmtTime(b.requested_at) : "",
+        "Name of Medicine": it.medicine_name + (it.brand_name ? ` (${it.brand_name})` : ""),
+        "No. of Medicine": qtyDisplay(it),
+        "Lot No. / Batch No.": it.batch_lot_no || "",
+        "Expiration Date": it.expiration_date ? fmtDateOnly(it.expiration_date) : "",
+        "Gen. Fund": it.fund_source === "Gen. Fund" ? "✓" : "",
+        "Ekon": it.fund_source === "Ekon" ? "✓" : "",
+        "PHO": it.fund_source === "PHO" ? "✓" : "",
+        "DOH": it.fund_source === "DOH" ? "✓" : "",
+        "Status": STATUS_MAP[it.status]?.label ?? it.status,
+        "Requested By": ii === 0 ? b.requested_by : "",
+      });
+    });
+  });
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Medicine Requests");
+  XLSX.writeFile(wb, `medicine_requests_${new Date().toISOString().split("T")[0]}.xlsx`);
+}
+
+/** Exports the same data as a printable PDF table — same column set and
+ *  order as the Excel export / on-screen table. Uses jsPDF + autoTable,
+ *  same libraries already used for the PDF export on the Medicine
+ *  Inventory page, so no new dependency is introduced. */
+async function exportRequestsToPDF(batches: RequestBatch[]) {
+  const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
+    import("jspdf"),
+    import("jspdf-autotable"),
+  ]);
+  const rows: (string | number)[][] = [];
+  batches.forEach((b, bi) => {
+    b.items.forEach((it, ii) => {
+      rows.push([
+        ii === 0 ? bi + 1 : "",
+        ii === 0 ? fmtDate(b.requested_at) : "",
+        it.medicine_name + (it.brand_name ? ` (${it.brand_name})` : ""),
+        qtyDisplay(it),
+        it.batch_lot_no || "—",
+        it.expiration_date ? fmtDateOnly(it.expiration_date) : "—",
+        it.fund_source === "Gen. Fund" ? "✓" : "",
+        it.fund_source === "Ekon" ? "✓" : "",
+        it.fund_source === "PHO" ? "✓" : "",
+        it.fund_source === "DOH" ? "✓" : "",
+        STATUS_MAP[it.status]?.label ?? it.status,
+        ii === 0 ? b.requested_by : "",
+      ]);
+    });
+  });
+
+  const doc = new jsPDF({ orientation: "landscape" });
+  doc.text("Medicine Requests Report", 14, 15);
+  doc.setFontSize(9);
+  doc.text(`Generated ${new Date().toLocaleString("en-PH")}`, 14, 21);
+  autoTable(doc, {
+    startY: 26,
+    head: [["#", "Date", "Name of Medicine", "No. of Medicine", "Lot/Batch No.", "Expiration", "Gen. Fund", "Ekon", "PHO", "DOH", "Status", "Requested By"]],
+    body: rows,
+    headStyles: { fillColor: [20, 83, 45] },
+    alternateRowStyles: { fillColor: [220, 252, 231] },
+    styles: { fontSize: 8 },
+  });
+  doc.save(`medicine_requests_${new Date().toISOString().split("T")[0]}.pdf`);
+}
+
 export default function RequestMedicinePage({ onToast }: Props) {
   const { t } = useTheme();
 
   const [batches, setBatches] = useState<RequestBatch[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<RequestBatch | null>(null);
 
   const [showNewRequest, setShowNewRequest] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -139,10 +274,29 @@ export default function RequestMedicinePage({ onToast }: Props) {
 
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [selectedDate, setSelectedDate] = useState("");
+  const [showExportDropdown, setShowExportDropdown] = useState(false);
+  const exportRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (exportRef.current && !exportRef.current.contains(e.target as Node)) setShowExportDropdown(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   // Which item's "Mark Received" button is currently mid-request — used
-  // to disable just that row's button (not the whole modal) while saving.
+  // to disable just that row's button while saving.
   const [markingId, setMarkingId] = useState<string | null>(null);
+  // Small confirm popup for "Mark as Received" — lets the pharmacist enter
+  // how much actually arrived (not just blindly accept the requested qty),
+  // since Warehouse may only have had partial stock. Set when a "Mark
+  // Received" button is clicked; cleared on cancel/confirm.
+  const [receivingItem, setReceivingItem] = useState<PharmacyRequestRow | null>(null);
+  const [receivedQtyText, setReceivedQtyText] = useState("");
+
   const [qtyText, setQtyText] = useState("1");
   const [suggestions, setSuggestions] = useState<SuggestedItem[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -162,7 +316,7 @@ export default function RequestMedicinePage({ onToast }: Props) {
     try {
       const { data, error } = await supabase
         .from("pharmacy_requests")
-        .select("id, medicine_name, brand_name, dosage, dosage_form, category, requested_qty, unit, status, requested_by, requested_at, notes, fulfilled_at, fulfilled_qty, request_batch_id, confirmed_at")
+        .select("id, medicine_name, brand_name, dosage, dosage_form, category, requested_qty, unit, status, requested_by, requested_at, notes, fulfilled_at, fulfilled_qty, request_batch_id, confirmed_at, batch_lot_no, expiration_date, fund_source")
         .order("requested_at", { ascending: false });
       if (error) throw error;
 
@@ -181,15 +335,6 @@ export default function RequestMedicinePage({ onToast }: Props) {
       grouped.forEach(b => { b.status = batchStatus(b.items); });
       grouped.sort((a, b) => b.requested_at.localeCompare(a.requested_at));
       setBatches(grouped);
-
-      // Keep the open detail popup (if any) in sync with the freshly
-      // loaded data — otherwise its statuses/actions can go stale after
-      // a realtime update or after this component's own markReceived().
-      setSelected(prev => {
-        if (!prev) return prev;
-        const updated = grouped.find(b => b.key === prev.key);
-        return updated ?? prev;
-      });
     } catch (err: any) {
       onToast(err.message || "Failed to load request history.", "error");
     } finally {
@@ -318,6 +463,12 @@ const handleQtyBlur = () => {
       // Belt-and-suspenders: strip drugs-only fields if somehow present on a supplies row.
       brand: itemCategory === "drugs" ? draft.brand : "",
       dosage: itemCategory === "drugs" ? draft.dosage : "",
+      // Lot/Batch No., Expiration Date, and Source of Medicine are no
+      // longer entered by the pharmacist — Warehouse fills these in when
+      // it fulfills the request, so they always go out empty from here.
+      batchLotNo: "",
+      expirationDate: "",
+      fundSource: "",
     }]);
     setDraft({ ...EMPTY_DRAFT, category: itemCategory, unit: draft.unit });
 setQtyText("1");
@@ -366,9 +517,12 @@ setQtyText("1");
       // submitRestockRequest() needs a matching update to:
       //   1) accept this pre-generated batchId and use it as-is instead of
       //      generating its own, so the id shown in the confirmation dialog
-      //      matches what actually lands in request_batch_id; and
-      //   2) write `brand` into the new brand_name column (drugs only —
-      //      pass null/undefined for supplies rows).
+      //      matches what actually lands in request_batch_id;
+      //   2) write `brand` into the brand_name column (drugs only — pass
+      //      null/undefined for supplies rows).
+      // batch_lot_no / expiration_date / fund_source are intentionally
+      // sent empty — Warehouse sets those columns itself when it
+      // fulfills the request, not the pharmacist at request time.
       // See lib/pharmacyData.ts.
       await submitRestockRequest(items, requesterName.trim(), reason.trim() || undefined, pendingRequestId);
       onToast(`Request sent to Warehouse (${items.length} item${items.length > 1 ? "s" : ""}).`, "success");
@@ -383,38 +537,47 @@ setQtyText("1");
     }
   };
 
-  /** Pharmacist clicks this after physically checking the delivered items
-   *  against a CONFIRMED request line — this is what flips that single
-   *  item's status to 'received'. That status change is exactly what the
-   *  DB trigger (fulfill_pharmacy_request_to_inventory) listens for to
-   *  create the real pharma_medicine_batches row(s) for this item, using
-   *  the actual warehouse batch/expiry (split across batches if needed).
-   *  Rejected/pending/alerted items never show this button — only
-   *  'confirm' does, matching the required flow (Warehouse confirms it
-   *  has stock -> Pharmacist checks the physical delivery -> THEN it
-   *  lands in the pharmacist's own inventory). */
-  const markReceived = async (itemId: string) => {
-    setMarkingId(itemId);
+  /** Opens the small "Mark as Received" confirm popup for one CONFIRMED
+   *  item, pre-filling the quantity field with the full requested amount
+   *  (the common case: everything arrived). The pharmacist only needs to
+   *  change it when Warehouse actually sent less. */
+  const openReceiveConfirm = (item: PharmacyRequestRow) => {
+    setReceivingItem(item);
+    setReceivedQtyText(String(item.requested_qty));
+  };
+
+  /** Pharmacist confirms the popup after physically checking the delivered
+   *  items against a CONFIRMED request line — this both flips that item's
+   *  status to 'received' AND records the actual quantity received
+   *  (fulfilled_qty), which may be less than requested_qty if Warehouse
+   *  only had partial stock. That status change is exactly what the DB
+   *  trigger (fulfill_pharmacy_request_to_inventory) listens for to create
+   *  the real pharma_medicine_batches row(s) for this item — using
+   *  fulfilled_qty (not requested_qty) as the actual amount added to
+   *  inventory, so a partial delivery doesn't overstate stock on hand. */
+  const confirmMarkReceived = async () => {
+    if (!receivingItem) return;
+    const parsed = parseInt(receivedQtyText, 10);
+    const qty = Number.isFinite(parsed) && parsed >= 0
+      ? Math.min(parsed, receivingItem.requested_qty)
+      : receivingItem.requested_qty;
+
+    setMarkingId(receivingItem.id);
     try {
       const { error } = await supabase
         .from("pharmacy_requests")
-        .update({ status: "received" })
-        .eq("id", itemId);
+        .update({ status: "received", fulfilled_qty: qty })
+        .eq("id", receivingItem.id);
       if (error) throw error;
 
-      onToast("Marked as received — added to inventory.", "success");
-
-      // Optimistically reflect the change in the open detail popup so the
-      // button disappears immediately instead of waiting for the realtime
-      // round-trip.
-      setSelected(prev => {
-        if (!prev) return prev;
-        const updatedItems = prev.items.map(it =>
-          it.id === itemId ? { ...it, status: "received" as RequestStatus } : it
-        );
-        return { ...prev, items: updatedItems, status: batchStatus(updatedItems) };
-      });
-
+      const isPartial = qty < receivingItem.requested_qty;
+      onToast(
+        isPartial
+          ? `Marked as received — ${qty}/${receivingItem.requested_qty} ${receivingItem.unit} (partial). Added to inventory.`
+          : "Marked as received — added to inventory.",
+        "success"
+      );
+      setReceivingItem(null);
       loadHistory();
     } catch (err: any) {
       onToast(err.message || "Failed to mark as received.", "error");
@@ -438,10 +601,18 @@ setQtyText("1");
   const thStyle: CSSProperties = {
     padding: "11px 16px", textAlign: "left", fontSize: 10.5, fontWeight: 800,
     color: t.green, textTransform: "uppercase", letterSpacing: 0.6,
-    background: `${t.green}12`, whiteSpace: "nowrap",
+    background: `${t.green}12`, whiteSpace: "nowrap", borderRight: `1px solid ${t.border2}`,
+  };
+  // Narrow, centered header for the four "Source of Medicine" check
+  // columns — mirrors the paper's compact boxes.
+  const thSourceStyle: CSSProperties = {
+    ...thStyle, textAlign: "center", width: 50, fontSize: 8.5, whiteSpace: "pre-line", lineHeight: 1.2, padding: "8px 4px",
   };
   const tdStyle: CSSProperties = {
-    padding: "12px 16px", fontSize: 12.5, color: t.text2, verticalAlign: "middle",
+    padding: "12px 16px", fontSize: 12.5, color: t.text2, verticalAlign: "middle", borderRight: `1px solid ${t.border2}`,
+  };
+  const tdSourceStyle: CSSProperties = {
+    padding: "12px 4px", fontSize: 13, color: t.green, textAlign: "center", fontWeight: 900, borderRight: `1px solid ${t.border2}`,
   };
 
   const isDrugs = itemCategory === "drugs";
@@ -449,11 +620,14 @@ setQtyText("1");
 
   const filteredBatches = batches.filter(b => {
     if (statusFilter !== "all" && b.status !== statusFilter) return false;
+    if (sourceFilter !== "all" && !b.items.some(it => it.fund_source === sourceFilter)) return false;
+    if (!withinSelectedDate(b.requested_at, selectedDate)) return false;
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       const matchesItem = b.items.some(it =>
         it.medicine_name.toLowerCase().includes(q) ||
-        (it.brand_name ?? "").toLowerCase().includes(q)
+        (it.brand_name ?? "").toLowerCase().includes(q) ||
+        (it.batch_lot_no ?? "").toLowerCase().includes(q)
       );
       const matchesRequester = b.requested_by.toLowerCase().includes(q);
       if (!matchesItem && !matchesRequester) return false;
@@ -461,8 +635,8 @@ setQtyText("1");
     return true;
   });
 
-  const activeFilterCount = (statusFilter !== "all" ? 1 : 0) + (search.trim() ? 1 : 0);
-  const clearFilters = () => { setSearch(""); setStatusFilter("all"); };
+  const activeFilterCount = (statusFilter !== "all" ? 1 : 0) + (sourceFilter !== "all" ? 1 : 0) + (selectedDate ? 1 : 0) + (search.trim() ? 1 : 0);
+  const clearFilters = () => { setSearch(""); setStatusFilter("all"); setSourceFilter("all"); setSelectedDate(""); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, position: "relative" }}>
@@ -490,7 +664,9 @@ setQtyText("1");
         </button>
       </div>
 
-      {/* ── Filter bar ── */}
+      {/* ── Filter bar — now with a Source of Medicine filter alongside
+          the existing Status filter, and search also matches Lot/Batch
+          No. ── */}
       <div style={{
         background: t.cardBg, borderRadius: 14, padding: "14px 18px",
         border: `1px solid ${t.cardBorder}`, boxShadow: "0 2px 12px rgba(0,0,0,0.05)",
@@ -502,7 +678,7 @@ setQtyText("1");
           </span>
           <input
             value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Search..."
+            placeholder="Search medicine, requester, or lot/batch no…"
             style={{
               width: "100%", boxSizing: "border-box", padding: "9px 34px 9px 32px",
               borderRadius: 8, border: `1.5px solid ${t.inputBorder}`, fontSize: 12.5,
@@ -529,179 +705,259 @@ setQtyText("1");
           <option value="received">Received</option>
         </select>
 
+        <select value={sourceFilter} onChange={e => setSourceFilter(e.target.value as SourceFilter)} style={{
+          padding: "8px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700,
+          border: `1.5px solid ${t.inputBorder}`, background: t.modalBg, color: t.text,
+          cursor: "pointer", fontFamily: "inherit",
+        }}>
+          <option value="all">All Sources</option>
+          {FUND_SOURCES.map(fs => <option key={fs} value={fs}>{fs}</option>)}
+        </select>
+
+        <input
+          type="date"
+          value={selectedDate}
+          onChange={e => setSelectedDate(e.target.value)}
+          style={{
+            padding: "8px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700,
+            border: `1.5px solid ${t.inputBorder}`, background: t.modalBg, color: t.text,
+            cursor: "pointer", fontFamily: "inherit",
+          }}
+        />
+
         {activeFilterCount > 0 && (
           <button onClick={clearFilters} style={{ border: "none", background: "transparent", color: "#dc2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
             <X size={12} /> Clear
           </button>
         )}
+
+        <div ref={exportRef} style={{ position: "relative", marginLeft: "auto" }}>
+          <button
+            onClick={() => setShowExportDropdown(v => !v)}
+            disabled={filteredBatches.length === 0}
+            style={{
+              padding: "9px 16px", borderRadius: 8, fontSize: 12, fontWeight: 800,
+              border: `1.5px solid ${t.border2}`, background: t.cardBg, color: t.green,
+              cursor: filteredBatches.length === 0 ? "not-allowed" : "pointer",
+              opacity: filteredBatches.length === 0 ? 0.5 : 1,
+              display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap", fontFamily: "inherit",
+            }}
+          >
+            <Download size={13} /> Export
+          </button>
+          {showExportDropdown && (
+            <div style={{
+              position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 40,
+              background: t.cardBg, border: `1px solid ${t.border2}`, borderRadius: 10,
+              minWidth: 180, boxShadow: "0 8px 24px rgba(0,0,0,0.15)", overflow: "hidden",
+            }}>
+              <button
+                onClick={() => { exportRequestsToExcel(filteredBatches); setShowExportDropdown(false); }}
+                style={{
+                  width: "100%", padding: "10px 16px", textAlign: "left", border: "none",
+                  borderBottom: `1px solid ${t.border2}`, background: "transparent", cursor: "pointer",
+                  fontSize: 13, color: t.text, display: "flex", alignItems: "center", gap: 10, fontWeight: 600, fontFamily: "inherit",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = `${t.green}12`)}
+                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+              >
+                <Download size={13} color={t.green} /> Export to Excel
+              </button>
+              <button
+                onClick={() => { exportRequestsToPDF(filteredBatches); setShowExportDropdown(false); }}
+                style={{
+                  width: "100%", padding: "10px 16px", textAlign: "left", border: "none",
+                  background: "transparent", cursor: "pointer",
+                  fontSize: 13, color: t.text, display: "flex", alignItems: "center", gap: 10, fontWeight: 600, fontFamily: "inherit",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = `${t.green}12`)}
+                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+              >
+                <Printer size={13} color={t.green} /> Export / Print PDF
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* ── History table ── */}
+      {/* ── History table — columns mirror the paper logbook:
+          # / Date / Name of Medicine / No. of Medicine / Lot No.-Batch No.
+          / Expiration Date / Source of Medicine (4 narrow check columns)
+          / Status / Requested By. No detail popup and no expanding row —
+          the Status column shows one pill per item, and a "Confirmed"
+          item's pill is directly clickable to open the small "Mark as
+          Received" popup. ── */}
       <div style={{
         background: t.cardBg, border: `1px solid ${t.cardBorder}`, borderRadius: 16,
         overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.06)",
       }}>
+        <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr>
               <th style={{ ...thStyle, width: 40 }}>#</th>
               <th style={thStyle}>Date</th>
-              <th style={thStyle}>Requested By</th>
-              <th style={thStyle}>Items</th>
-              <th style={{ ...thStyle, textAlign: "right" }}>Quantity</th>
+              <th style={thStyle}>Name of Medicine</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>No. of Medicine</th>
+              <th style={thStyle}>Lot No. / Batch No.</th>
+              <th style={thStyle}>Expiration Date</th>
+              {FUND_SOURCES.map(fs => (
+                <th key={fs} style={thSourceStyle}>{fs === "Gen. Fund" ? "GEN.\nFUND" : fs.toUpperCase()}</th>
+              ))}
               <th style={{ ...thStyle, textAlign: "center" }}>Status</th>
+              <th style={{ ...thStyle, borderRight: "none" }}>Requested By</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={6} style={{ ...tdStyle, textAlign: "center", padding: 40, fontStyle: "italic", color: t.text3 }}>Loading requests…</td></tr>
+              <tr><td colSpan={12} style={{ ...tdStyle, textAlign: "center", padding: 40, fontStyle: "italic", color: t.text3, borderRight: "none" }}>Loading requests…</td></tr>
             ) : filteredBatches.length === 0 ? (
-              <tr><td colSpan={6} style={{ ...tdStyle, textAlign: "center", padding: 40, fontStyle: "italic", color: t.text3 }}>
+              <tr><td colSpan={12} style={{ ...tdStyle, textAlign: "center", padding: 40, fontStyle: "italic", color: t.text3, borderRight: "none" }}>
                 {batches.length === 0 ? "No requests sent yet." : "No requests match your filters."}
               </td></tr>
             ) : filteredBatches.map((b, i) => (
-              <tr
-                key={b.key}
-                onClick={() => setSelected(b)}
-                style={{ cursor: "pointer", borderTop: `1px solid ${t.border2}` }}
-              >
-                <td style={{ ...tdStyle, color: t.text3, verticalAlign: "top" }}>{i + 1}</td>
-                <td style={{ ...tdStyle, verticalAlign: "top" }}>
-                  <div style={{ fontWeight: 700, color: t.text }}>{fmtDate(b.requested_at)}</div>
-                  <div style={{ fontSize: 10.5, color: t.text3 }}>{fmtTime(b.requested_at)}</div>
-                </td>
-                <td style={{ ...tdStyle, verticalAlign: "top" }}>{b.requested_by}</td>
-                <td style={{ ...tdStyle, maxWidth: 220, verticalAlign: "top" }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                    {b.items.slice(0, 5).map(it => (
-                      <span key={it.id} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {it.medicine_name}{it.brand_name ? ` (${it.brand_name})` : ""}
-                      </span>
-                    ))}
-                    {b.items.length > 5 && (
-                      <span style={{ color: t.green, fontWeight: 700, fontSize: 11 }}>+{b.items.length - 5} more</span>
-                    )}
-                  </div>
-                </td>
-                {/* Per-item quantity, one line per item — lines up with the
-                    Items column above instead of a single summed total, so
-                    a multi-item request (e.g. "Paracetamol / Paracetamol")
-                    shows each line's own qty ("1 Boxes" / "100 Pieces")
-                    right next to it, matching Warehouse's Pharmacy Requests
-                    table. */}
-                <td style={{ ...tdStyle, textAlign: "right", fontWeight: 800, color: t.text, verticalAlign: "top" }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                    {b.items.slice(0, 5).map(it => (
-                      <span key={it.id} style={{ whiteSpace: "nowrap" }}>
-                        {it.requested_qty} {it.unit}
-                      </span>
-                    ))}
-                    {b.items.length > 5 && (
-                      // Empty spacer line so this column's rows stay
-                      // vertically aligned with the "+N more" line in Items.
-                      <span>&nbsp;</span>
-                    )}
-                  </div>
-                </td>
-                <td style={{ ...tdStyle, textAlign: "center", verticalAlign: "top" }}><StatusPill status={b.status} /></td>
-              </tr>
+                <tr key={b.key} style={{ borderTop: `1px solid ${t.border2}` }}>
+                  <td style={{ ...tdStyle, color: t.text3, verticalAlign: "top" }}>{i + 1}</td>
+                  <td style={{ ...tdStyle, verticalAlign: "top" }}>
+                    <div style={{ fontWeight: 700, color: t.text }}>{fmtDate(b.requested_at)}</div>
+                    <div style={{ fontSize: 10.5, color: t.text3 }}>{fmtTime(b.requested_at)}</div>
+                  </td>
+                  <td style={{ ...tdStyle, maxWidth: 220, verticalAlign: "top" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                      {b.items.slice(0, 5).map(it => (
+                        <span key={it.id} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {it.medicine_name}{it.brand_name ? ` (${it.brand_name})` : ""}
+                        </span>
+                      ))}
+                      {b.items.length > 5 && (
+                        <span style={{ color: t.green, fontWeight: 700, fontSize: 11 }}>+{b.items.length - 5} more</span>
+                      )}
+                    </div>
+                  </td>
+                  {/* Per-item quantity, one line per item. Once an item is
+                      received, this reflects the ACTUAL delivered amount
+                      vs. what was requested (e.g. "50/100 Pieces") rather
+                      than always showing the original ask. */}
+                  <td style={{ ...tdStyle, textAlign: "right", fontWeight: 800, color: t.text, verticalAlign: "top" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                      {b.items.slice(0, 5).map(it => (
+                        <span key={it.id} style={{ whiteSpace: "nowrap" }}>{qtyDisplay(it)}</span>
+                      ))}
+                      {b.items.length > 5 && <span>&nbsp;</span>}
+                    </div>
+                  </td>
+                  {/* Lot No. / Batch No. — one line per item, same alignment idea */}
+                  <td style={{ ...tdStyle, verticalAlign: "top" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                      {b.items.slice(0, 5).map(it => (
+                        <span key={it.id} style={{ whiteSpace: "nowrap" }}>{it.batch_lot_no || "—"}</span>
+                      ))}
+                      {b.items.length > 5 && <span>&nbsp;</span>}
+                    </div>
+                  </td>
+                  {/* Expiration Date — one line per item */}
+                  <td style={{ ...tdStyle, verticalAlign: "top" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                      {b.items.slice(0, 5).map(it => (
+                        <span key={it.id} style={{ whiteSpace: "nowrap" }}>{it.expiration_date ? fmtDateOnly(it.expiration_date) : "—"}</span>
+                      ))}
+                      {b.items.length > 5 && <span>&nbsp;</span>}
+                    </div>
+                  </td>
+                  {/* Source of Medicine — a batch can technically mix sources
+                      across its items (different medicines funded
+                      differently), so each check column shows a ✓ if ANY
+                      item in this batch used that source. */}
+                  {FUND_SOURCES.map(fs => (
+                    <td key={fs} style={{ ...tdSourceStyle, verticalAlign: "top" }}>
+                      {b.items.some(it => it.fund_source === fs) ? "✓" : ""}
+                    </td>
+                  ))}
+                  {/* Status — one pill per item (same one-line-per-item
+                      pattern as the columns above). A "Confirmed" item's
+                      pill is clickable: tapping it opens the small "Mark as
+                      Received" popup right there, no separate Action
+                      column and no expanding row needed. */}
+                  <td style={{ ...tdStyle, textAlign: "center", verticalAlign: "top" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "center" }}>
+                      {b.items.slice(0, 5).map(it => (
+                        it.status === "confirm" ? (
+                          <button
+                            key={it.id}
+                            type="button"
+                            disabled={markingId === it.id}
+                            onClick={() => openReceiveConfirm(it)}
+                            title="Click to mark as received"
+                            style={{ border: "none", background: "none", padding: 0, cursor: markingId === it.id ? "not-allowed" : "pointer" }}
+                          >
+                            <StatusPill status={it.status} />
+                          </button>
+                        ) : (
+                          <StatusPill key={it.id} status={it.status} />
+                        )
+                      ))}
+                      {b.items.length > 5 && <span>&nbsp;</span>}
+                    </div>
+                  </td>
+                  <td style={{ ...tdStyle, verticalAlign: "top", borderRight: "none" }}>{b.requested_by}</td>
+                </tr>
             ))}
           </tbody>
         </table>
+        </div>
         <div style={{ padding: "12px 16px", borderTop: `1px solid ${t.border2}`, fontSize: 11.5, color: t.text3, fontWeight: 600 }}>
           {loading ? "" : `${filteredBatches.length} of ${batches.length} request${batches.length !== 1 ? "s" : ""} shown`}
         </div>
       </div>
 
-      {/* ── Detail popup ── */}
-      {selected && (
+      {/* ── "Mark as Received" confirm popup — small and focused, not the
+          old full detail modal. Opens only when a "Mark Received" button
+          is clicked. Lets the pharmacist record the ACTUAL quantity
+          delivered (defaults to the full requested amount, the common
+          case), so a partial delivery — e.g. requested 100, Warehouse only
+          had 50 — is captured accurately instead of assumed complete. ── */}
+      {receivingItem && (
         <div
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
-          onClick={() => setSelected(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+          onClick={() => setReceivingItem(null)}
         >
           <div
             onClick={e => e.stopPropagation()}
             style={{
-              background: t.cardBg, borderRadius: 16, width: "100%", maxWidth: 860,
-              maxHeight: "84vh", overflow: "hidden", display: "flex", flexDirection: "column",
-              boxShadow: "0 24px 60px rgba(0,0,0,0.35)", border: `2px solid ${DARK_GREEN}`,
+              background: t.cardBg, borderRadius: 16, width: "100%", maxWidth: 380,
+              padding: "22px 22px 18px", boxShadow: "0 20px 50px rgba(0,0,0,0.35)", border: `2px solid ${DARK_GREEN}`,
             }}
           >
-            <div style={{ background: "linear-gradient(135deg,#116b37,#18a052)", padding: "16px 22px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
-              <div>
-                <div style={{ color: "#fff", fontSize: 15, fontWeight: 900 }}>Request Details</div>
-                <div style={{ color: "rgba(255,255,255,0.85)", fontSize: 12, marginTop: 2 }}>
-                  {fmtDate(selected.requested_at)} · {fmtTime(selected.requested_at)} · {selected.requested_by}
-                </div>
-              </div>
-              <button onClick={() => setSelected(null)} style={{
-                border: "1px solid rgba(255,255,255,0.5)", background: "rgba(255,255,255,0.15)",
-                color: "#fff", borderRadius: 8, padding: "7px 13px", fontWeight: 800, cursor: "pointer",
-              }}>✕ Close</button>
+            <div style={{ fontSize: 15, fontWeight: 900, color: t.text, marginBottom: 4 }}>Mark as Received</div>
+            <div style={{ fontSize: 12.5, color: t.text3, marginBottom: 16, lineHeight: 1.5 }}>
+              {receivingItem.medicine_name}{receivingItem.brand_name ? ` (${receivingItem.brand_name})` : ""}
+              {" "}— requested {receivingItem.requested_qty} {receivingItem.unit}
             </div>
 
-            <div style={{ padding: "14px 22px", flexShrink: 0, display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ fontSize: 12, color: t.text3, fontWeight: 700 }}>Overall status:</span>
-              <StatusPill status={selected.status} />
-              <span style={{ fontSize: 12, color: t.text3, marginLeft: "auto" }}>
-                {selected.items.length} item{selected.items.length !== 1 ? "s" : ""} · {selected.items.reduce((s, it) => s + it.requested_qty, 0)} total units
-              </span>
+            <label style={lbl}>Actual quantity received</label>
+            <input
+              type="number" min={0} max={receivingItem.requested_qty} value={receivedQtyText}
+              onChange={e => setReceivedQtyText(e.target.value)}
+              style={inp}
+            />
+            <div style={{ fontSize: 11, color: t.text3, marginTop: 7, lineHeight: 1.5 }}>
+              If Warehouse sent less than requested, change this to the number actually delivered — it gets recorded as a partial fulfillment instead of the full request.
             </div>
 
-            <div style={{ flex: 1, overflowY: "auto", padding: "0 22px 20px" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={{ ...thStyle, width: 28 }}>#</th>
-                    <th style={thStyle}>Generic Name / Name</th>
-                    <th style={thStyle}>Brand</th>
-                    <th style={thStyle}>Dosage</th>
-                    <th style={thStyle}>Type</th>
-                    <th style={{ ...thStyle, textAlign: "right" }}>Qty</th>
-                    <th style={thStyle}>Notes</th>
-                    <th style={{ ...thStyle, textAlign: "center" }}>Status</th>
-                    <th style={thStyle}>Approved On</th>
-                    <th style={{ ...thStyle, textAlign: "center" }}>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {selected.items.map((it, i) => (
-                    <tr key={it.id} style={{ borderTop: `1px solid ${t.border2}` }}>
-                      <td style={{ ...tdStyle, color: t.text3, fontSize: 11 }}>{i + 1}</td>
-                      <td style={{ ...tdStyle, fontWeight: 700, color: t.text }}>{it.medicine_name}</td>
-                      <td style={{ ...tdStyle, fontSize: 11.5 }}>{it.category === "drugs" ? (it.brand_name || "—") : "—"}</td>
-                      <td style={{ ...tdStyle, fontSize: 11.5 }}>{it.category === "drugs" ? (it.dosage || "—") : "—"}</td>
-                      <td style={{ ...tdStyle, fontSize: 11.5 }}>{it.dosage_form || "—"}</td>
-                      <td style={{ ...tdStyle, textAlign: "right", fontWeight: 700 }}>
-                        {it.status === "received" && it.fulfilled_qty != null && it.fulfilled_qty < it.requested_qty
-                          ? `${it.fulfilled_qty}/${it.requested_qty} ${it.unit}`
-                          : `${it.requested_qty} ${it.unit}`}
-                      </td>
-                      <td style={{ ...tdStyle, fontSize: 11.5 }}>{it.notes || "—"}</td>
-<td style={{ ...tdStyle, textAlign: "center" }}><StatusPill status={it.status} /></td>
-<td style={{ ...tdStyle, fontSize: 11.5, whiteSpace: "nowrap" }}>
-  {it.confirmed_at ? `${fmtDate(it.confirmed_at)} · ${fmtTime(it.confirmed_at)}` : "—"}
-</td>
-<td style={{ ...tdStyle, textAlign: "center" }}>
-                        {it.status === "confirm" ? (
-                          <button
-                            disabled={markingId === it.id}
-                            onClick={() => markReceived(it.id)}
-                            style={{
-                              background: "#16a34a", color: "#fff", border: "none", borderRadius: 20,
-                              padding: "5px 14px", fontSize: 10.5, fontWeight: 800,
-                              cursor: markingId === it.id ? "not-allowed" : "pointer",
-                              fontFamily: "inherit", opacity: markingId === it.id ? 0.6 : 1, whiteSpace: "nowrap",
-                            }}
-                          >{markingId === it.id ? "Saving…" : "Mark Received"}</button>
-                        ) : (
-                          <span style={{ color: t.text3, fontSize: 11 }}>—</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+              <button onClick={() => setReceivingItem(null)} disabled={markingId === receivingItem.id} style={{
+                flex: 1, padding: "11px 0", borderRadius: 10, border: `1.5px solid ${t.border2}`,
+                background: "transparent", color: t.text2, fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "inherit",
+              }}>Cancel</button>
+              <button
+                disabled={markingId === receivingItem.id}
+                onClick={confirmMarkReceived}
+                style={{
+                  flex: 1.4, padding: "11px 0", borderRadius: 10, border: "none",
+                  background: "#16a34a", color: "#fff", fontSize: 13, fontWeight: 900, cursor: "pointer",
+                  fontFamily: "inherit", opacity: markingId === receivingItem.id ? 0.6 : 1,
+                }}
+              >{markingId === receivingItem.id ? "Saving…" : "Confirm Received"}</button>
             </div>
           </div>
         </div>
@@ -851,6 +1107,14 @@ setQtyText("1");
   style={inp} />
                   </div>
                 </div>
+
+                {/* Lot No./Batch No., Expiration Date, and Source of
+                    Medicine are intentionally NOT collected here anymore —
+                    Warehouse assigns the actual lot/expiry/funding source
+                    when it fulfills the request, and those values then
+                    show up automatically in the history table and the
+                    expanded row above. Asking the pharmacist to guess them
+                    at request time was redundant and error-prone. */}
               </div>
               <button onClick={addItem} style={{
                 marginTop: 14, width: "100%", padding: 10, borderRadius: 8,

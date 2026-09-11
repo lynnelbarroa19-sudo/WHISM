@@ -343,7 +343,7 @@ export default function LoginPage() {
 
   const LogoBlock = () => (
     <>
-      <img src="/logo.jpg" alt="SMARTRHU Logo" className={styles.logo} />
+      <img src="/rhulogo.png" alt="SMARTRHU Logo" className={styles.logo} />
       <p className={styles.logoSub}>Rural Healthcare Unit Lopez, Quezon</p>
       <div className={styles.divider} />
     </>

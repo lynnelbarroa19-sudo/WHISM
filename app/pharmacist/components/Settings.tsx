@@ -78,6 +78,11 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
   const [toast, setToast] = useState("");
   const [toastType, setToastType] = useState<"success" | "error">("success");
   const [showCamera, setShowCamera] = useState(false);
+  // Lightbox: clicking either avatar (sidebar chip or the big profile
+  // circle) opens the photo full-size in an overlay. Just a viewer — no
+  // upload affordances live here, that's still the Change Photo/Camera
+  // buttons below the big avatar.
+  const [showPhotoPreview, setShowPhotoPreview] = useState(false);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -317,7 +322,11 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
         <div className="pset-sidebar" style={{ width: 240, background: t.cardBg, borderRadius: 16, padding: "20px 16px", boxShadow: "0 1px 8px rgba(0,0,0,.07)", border: `1px solid ${t.cardBorder}`, flexShrink: 0 }}>
 
           <div style={{ display: "flex", alignItems: "center", gap: 10, background: t.dispenseCard, borderRadius: 10, padding: "10px 12px", marginBottom: 20, border: `1px solid ${t.border}` }}>
-            <div style={{ width: 40, height: 40, borderRadius: "50%", overflow: "hidden", background: t.green + "22", flexShrink: 0, border: `2px solid ${t.green}` }}>
+            <div
+              onClick={() => photo && setShowPhotoPreview(true)}
+              title={photo ? "Click to view photo" : undefined}
+              style={{ width: 40, height: 40, borderRadius: "50%", overflow: "hidden", background: t.green + "22", flexShrink: 0, border: `2px solid ${t.green}`, cursor: photo ? "pointer" : "default" }}
+            >
               {photo
                 ? <img src={photo} alt="avatar" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={() => setPhoto(null)} />
                 : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 700, color: t.greenLight }}>{initials}</div>}
@@ -356,13 +365,17 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
 
                 <div style={{ display: "flex", alignItems: "center", gap: 20, marginBottom: 32, flexWrap: "wrap" }}>
                   <div style={{ position: "relative", flexShrink: 0 }}>
-                    <div style={{ width: 90, height: 90, borderRadius: "50%", overflow: "hidden", border: `3px solid ${t.green}`, background: t.green + "22" }}>
+                    <div
+                      onClick={() => photo && setShowPhotoPreview(true)}
+                      title={photo ? "Click to view photo" : undefined}
+                      style={{ width: 90, height: 90, borderRadius: "50%", overflow: "hidden", border: `3px solid ${t.green}`, background: t.green + "22", cursor: photo ? "pointer" : "default" }}
+                    >
                       {photo
                         ? <img src={photo} alt="Profile" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={() => setPhoto(null)} />
                         : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 30, fontWeight: 700, color: t.green }}>{initials}</div>}
                     </div>
                     {uploading && (
-                      <div style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <div style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
                         <div style={{ width: 24, height: 24, borderRadius: "50%", border: "3px solid #fff", borderTopColor: "transparent", animation: "spin 0.7s linear infinite" }} />
                       </div>
                     )}
@@ -496,6 +509,39 @@ export function PharmacistSettings({ initialTab }: { initialTab?: Tab }) {
           )}
         </div>
       </div>
+
+      {/* Photo lightbox — opens when either avatar is clicked. Pure viewer:
+          click the backdrop or the X to close; no upload controls in here,
+          those stay on the profile tab's Change Photo / Camera buttons. */}
+      {showPhotoPreview && photo && (
+        <div
+          onClick={() => setShowPhotoPreview(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.75)", backdropFilter: "blur(4px)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
+        >
+          <div onClick={e => e.stopPropagation()} style={{ position: "relative", maxWidth: "min(480px, 90vw)", maxHeight: "85vh" }}>
+            <button
+              type="button"
+              aria-label="Close photo preview"
+              onClick={() => setShowPhotoPreview(false)}
+              style={{
+                position: "absolute", top: -14, right: -14, width: 32, height: 32, borderRadius: "50%",
+                border: `2px solid ${t.cardBg}`, background: t.green, color: "#fff", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 12px rgba(0,0,0,.3)",
+              }}
+            >
+              <XIcon size={15} color="#fff" />
+            </button>
+            <img
+              src={photo}
+              alt="Profile — full size"
+              style={{
+                display: "block", width: "100%", height: "100%", maxHeight: "85vh", objectFit: "contain",
+                borderRadius: 16, boxShadow: "0 24px 64px rgba(0,0,0,.4)", border: `4px solid ${t.cardBg}`,
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {showCamera && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", backdropFilter: "blur(4px)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
