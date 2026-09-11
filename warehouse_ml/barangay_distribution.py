@@ -43,6 +43,24 @@ kagaya ng ginagawa ng "+ New Release" button -- kaya lumalabas na rin
 ito sa Medicine Releases page, may status na "pending" hanggang ma-
 receive.
 
+>>> FIX v3 (batch_id palaging NULL sa barangay_distributions):
+Dating ang FEFO batch selection (_pick_fefo_batch) ay TINATAWAG LANG
+sa loob ng create_releases_for_confirmed_distribution() -- ibig sabihin
+ang napiling batch_id ay naisusulat LANG sa `release_items.batch_id`,
+HINDI kailanman sa `barangay_distributions.batch_id` (ang dist_rows
+dict sa save_confirmed_distribution() ay hindi talaga naglalagay ng
+"batch_id" key kahit kailan -- kaya laging bumabalik sa DB default na
+NULL ang column na 'yon).
+
+Ngayon: ang batch selection ay kino-compute ISANG BESES LANG sa loob
+ng save_confirmed_distribution() (bagong helper na
+_pick_fefo_batches_for_medicines()), at ang resultang
+`batch_id_by_medicine` mapping ay ginagamit sa DALAWANG lugar:
+  1. dist_rows (barangay_distributions) -- bagong "batch_id" key
+  2. ipinapasa na lang papunta sa create_releases_for_confirmed_
+     distribution() bilang parameter, sa halip na ikompyut ulit doon
+     (iniiwasan din ang duplicate Supabase query).
+
 ⚠️ PAALALA (kailangan pang i-verify laban sa totoong "+ New Release"
    flow -- tingnan ang mga paalala sa loob ng create_releases_for_
    confirmed_distribution() sa ibaba):
@@ -297,14 +315,6 @@ def _pick_fefo_batch(supabase_client, medicine_id: str, needed_qty: int) -> Opti
 
     Nagbabalik ng None kung walang available/low_stock na batch para
     sa medicine_id na ito.
-
-    >>> FIX (WinError/timeout dahil sa dami ng calls): TINATAWAG na
-    lang ito ISANG BESES PER GAMOT (hindi per barangay) sa loob ng
-    create_releases_for_confirmed_distribution() -- pareho naman ang
-    napipiling batch para sa lahat ng barangay na tatanggap ng
-    parehong gamot (wala pa tayong per-batch deduction, tingnan ang
-    PAALALA #2 sa itaas ng file), kaya walang saysay na ulitin ito
-    96 beses. <<<
     """
     resp = (
         supabase_client.table("medicine_batches")
@@ -329,10 +339,42 @@ def _pick_fefo_batch(supabase_client, medicine_id: str, needed_qty: int) -> Opti
     return resp.data[0]
 
 
+def _pick_fefo_batches_for_medicines(
+    supabase_client, total_needed_by_medicine: Dict[str, int]
+) -> Dict[str, str]:
+    """
+    >>> BAGO v3: hiwalay na function -- ito ang GINAGAMIT NA IISANG
+    beses sa save_confirmed_distribution() para makuha ang batch_id
+    PARA SA DALAWANG table (barangay_distributions AT release_items),
+    sa halip na dati kung saan ang FEFO selection ay nakatago lang sa
+    loob ng create_releases_for_confirmed_distribution() -- kaya
+    "release_items" lang ang may batch_id, "barangay_distributions" ay
+    laging NULL.
+
+    Tumatawag ng _pick_fefo_batch() ISANG BESES PER UNIKONG GAMOT
+    (hindi per barangay) -- gaya rin ng dating optimization: pareho
+    naman ang napipiling batch para sa lahat ng barangay na
+    tatanggap ng parehong gamot (wala pa tayong per-batch deduction,
+    tingnan ang PAALALA #2 sa itaas ng file).
+
+    Ibinabalik: { medicine_id: batch_id } -- gamot na walang
+    available/low_stock na batch ay HINDI kasama sa resulta (walang
+    key), kaya laging gamitin ang .get(medicine_id) sa panig ng
+    tumatawag, hindi [medicine_id].
+    """
+    batch_id_by_medicine: Dict[str, str] = {}
+    for medicine_id, total_needed in total_needed_by_medicine.items():
+        batch = _pick_fefo_batch(supabase_client, medicine_id, total_needed)
+        if batch is not None:
+            batch_id_by_medicine[medicine_id] = batch["batch_id"]
+    return batch_id_by_medicine
+
+
 def create_releases_for_confirmed_distribution(
     supabase_client,
     rows: List[dict],
     name_to_id: Dict[str, str],
+    batch_id_by_medicine: Dict[str, str],
 ) -> dict:
     """
     Gumawa ng TUNAY na 'releases' + 'release_items' record, isang
@@ -347,6 +389,14 @@ def create_releases_for_confirmed_distribution(
     sa parehong query na ginawa na ng save_confirmed_distribution(),
     para hindi na tayo mag-duplicate ng Supabase call).
 
+    `batch_id_by_medicine` -- >>> BAGO v3: PRE-COMPUTED na FEFO batch
+    selection (mula sa _pick_fefo_batches_for_medicines(), tinawag na
+    ng save_confirmed_distribution() BAGO pa man ang function na ito),
+    ipinapasa na lang dito sa halip na ikompyut ulit -- iniiwasan ang
+    duplicate na Supabase query PARA SA BAWAT GAMOT, at sigurado na
+    IISA lang ang batch na ginagamit sa BUONG barangay_distributions +
+    release_items para sa parehong gamot sa parehong confirm action.
+
     Ibinabalik: { releases_created, release_items_created, skipped }
 
     >>> FIX v2 (timeout sa 96-barangay na Manual save): dating
@@ -356,8 +406,8 @@ def create_releases_for_confirmed_distribution(
     timeout ng frontend. Ngayon:
 
       1. FEFO batch selection: ISANG QUERY PER UNIKONG GAMOT (hindi
-         per barangay) -- pareho naman ang resulta para sa lahat ng
-         barangay na tumatanggap ng parehong gamot.
+         per barangay), tapos v3: GINAWA NA RIN SA LABAS ng function
+         na ito, ipinapasa na lang bilang parameter.
       2. 'releases' insert: ISANG BULK INSERT para sa LAHAT ng
          barangay (list ng dicts sa isang .insert() call).
       3. 'release_items' insert: ISANG (o ilang chunked) BULK INSERT
@@ -380,27 +430,7 @@ def create_releases_for_confirmed_distribution(
     if not rows_by_dest:
         return {"releases_created": 0, "release_items_created": 0, "skipped": 0}
 
-    # ---------- 2. FEFO batch selection -- ISANG BESES PER UNIKONG
-    # GAMOT, hindi per barangay. Ginagamit ang TOTAL na kailangan
-    # (sum ng quantity sa LAHAT ng barangay para sa gamot na iyon)
-    # para sa "sapat ba ang batch" na check. ----------
-    total_needed_by_medicine: Dict[str, int] = {}
-    for dest_rows in rows_by_dest.values():
-        for r in dest_rows:
-            medicine_id = name_to_id.get(r["medicine_name"])
-            if medicine_id is None:
-                continue
-            total_needed_by_medicine[medicine_id] = (
-                total_needed_by_medicine.get(medicine_id, 0) + int(r["quantity"])
-            )
-
-    batch_id_by_medicine: Dict[str, str] = {}
-    for medicine_id, total_needed in total_needed_by_medicine.items():
-        batch = _pick_fefo_batch(supabase_client, medicine_id, total_needed)
-        if batch is not None:
-            batch_id_by_medicine[medicine_id] = batch["batch_id"]
-
-    # ---------- 3. Alamin ang panimulang sequence number ngayong araw,
+    # ---------- 2. Alamin ang panimulang sequence number ngayong araw,
     # para hindi mag-conflict ang release_number (UNIQUE constraint) --
     # tingnan ang PAALALA #1 sa itaas ng file tungkol sa format nito. ----------
     today = pd.Timestamp.today()
@@ -420,7 +450,7 @@ def create_releases_for_confirmed_distribution(
         except (ValueError, IndexError):
             continue
 
-    # ---------- 4. Buuin ang LAHAT ng 'releases' row (isa per
+    # ---------- 3. Buuin ang LAHAT ng 'releases' row (isa per
     # barangay), tapos ISANG BULK INSERT lang para sa lahat. ----------
     seq = existing_seq
     release_number_by_dest: Dict[str, str] = {}
@@ -454,7 +484,7 @@ def create_releases_for_confirmed_distribution(
     }
     releases_created = len(release_id_by_dest)
 
-    # ---------- 5. Buuin ang LAHAT ng 'release_items' row, tapos
+    # ---------- 4. Buuin ang LAHAT ng 'release_items' row, tapos
     # BULK INSERT (chunked kung sobrang dami, para hindi masyadong
     # malaki ang isang payload). ----------
     item_insert_rows = []
@@ -534,6 +564,19 @@ def save_confirmed_distribution(
     for r in rows:
         totals_by_med[r["medicine_name"]] = totals_by_med.get(r["medicine_name"], 0) + int(r["quantity"])
 
+    # >>> FIX v3: FEFO batch selection, ISANG BESES LANG, BAGO pa man
+    # buuin ang dist_rows -- ito ang dating kulang, kaya laging NULL
+    # ang barangay_distributions.batch_id. Keyed by medicine_id (hindi
+    # medicine_name) dahil FEFO query ay batay sa medicine_id.
+    total_needed_by_medicine: Dict[str, int] = {}
+    for med_name, total_qty in totals_by_med.items():
+        medicine_id = name_to_id.get(med_name)
+        if medicine_id is None:
+            continue
+        total_needed_by_medicine[medicine_id] = total_qty
+
+    batch_id_by_medicine = _pick_fefo_batches_for_medicines(supabase_client, total_needed_by_medicine)
+
     today = pd.Timestamp.today().normalize()
     end_date = today + pd.Timedelta(days=forecast_period_days)
     forecast_period = f"{today.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
@@ -571,6 +614,12 @@ def save_confirmed_distribution(
         dist_rows.append({
             "forecast_id": forecast_id,
             "medicine_id": medicine_id,
+            # >>> FIX v3: ito yung dating kulang -- walang "batch_id"
+            # key dati, kaya laging NULL sa DB. Kung walang available/
+            # low_stock na batch para sa gamot na ito, .get() ay
+            # magbabalik ng None -- tama at inaasahan iyon (mananatiling
+            # NULL ang column, hindi nag-e-error).
+            "batch_id": batch_id_by_medicine.get(medicine_id),
             "destination_id": r["destination_id"],
             "quantity": qty,
             "status": "pending",
@@ -582,9 +631,16 @@ def save_confirmed_distribution(
     # >>> BAGO: gumawa rin ng tunay na Release, para lumabas sa
     # Medicine Releases page -- tingnan ang mga PAALALA sa itaas ng
     # file tungkol sa mga assumption dito (release_number format,
-    # walang stock deduction, single-batch FEFO lang). <<<
+    # walang stock deduction, single-batch FEFO lang).
+    #
+    # >>> FIX v3: ipinapasa na ang PARE-PAREHONG batch_id_by_medicine
+    # na kinompyut sa itaas -- hindi na ito kino-kompyut ulit sa loob
+    # ng function na ito (dating ganito, duplicate Supabase query),
+    # at sigurado na IISA lang ang napiling batch para sa parehong
+    # gamot sa DALAWANG table (barangay_distributions + release_items)
+    # sa loob ng iisang confirm action. <<<
     release_result = create_releases_for_confirmed_distribution(
-        supabase_client, rows, name_to_id
+        supabase_client, rows, name_to_id, batch_id_by_medicine
     )
 
     return {

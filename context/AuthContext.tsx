@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";
-import { supabase, UserRole } from "@/lib/supabase";  // remove getRouteForRole
+import { supabase, UserRole, clearRememberMe } from "@/lib/supabase";
 
 export interface AuthUser {
   id: string;
@@ -102,12 +102,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.setItem("smartrhu_user", JSON.stringify(u));
   }
 
-  // ← No useRouter here, logout just clears state
   async function logout() {
     setUser(null);
     localStorage.removeItem("smartrhu_user");
+    clearRememberMe();
     await supabase.auth.signOut();
-    // Redirect is handled by the component calling logout
   }
 
   return (

@@ -112,7 +112,7 @@ export default function Sidebar() {
     { name: 'Dashboard', icon: LayoutDashboard, href: '/warehouse/dashboard' },
     { name: 'Medicine Inventory', icon: Package, href: '/warehouse/medicinestock' },
     { name: 'Dispense Medicine', icon: PackageMinus, href: '/warehouse/releases' },
-    { name: 'Pharmacy Request', icon: ClipboardList, href: '/warehouse/requests' },
+    { name: 'Request Medicine', icon: ClipboardList, href: '/warehouse/requests' },
   ]
 
   // Only one nav item should ever look "active" at a time. Page links use

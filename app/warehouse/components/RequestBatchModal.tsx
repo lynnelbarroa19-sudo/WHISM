@@ -5,7 +5,13 @@ import styles from './warehouse.module.css'
 
 type ReqStatus = 'pending' | 'confirm' | 'alerted' | 'rejected' | 'received'
 type ReqCategory = 'drugs' | 'supplies'
+type ReqSource = 'pharmacy' | 'laboratory' | 'barangay'
 
+// The three source tables have different shapes — pharmacy_requests /
+// laboratory_requests share brand_name + fund_source (no `barangay`
+// column); barangay_requests has `barangay` instead (no brand_name /
+// fund_source). Every field beyond the common core is optional here so
+// one row type can represent whichever table was actually queried.
 interface RequestRow {
   id: string
   requested_by: string
@@ -20,6 +26,9 @@ interface RequestRow {
   notes: string | null
   fulfilled_qty: number | null
   request_batch_id: string | null
+  brand_name?: string | null      // pharmacy_requests / laboratory_requests only
+  fund_source?: string | null     // pharmacy_requests / laboratory_requests only
+  barangay?: string | null        // barangay_requests only
 }
 
 /** Warehouse stock for one medicine, expressed three ways so a mismatch
@@ -37,8 +46,21 @@ interface EnrichedRow extends RequestRow {
 }
 
 interface RequestNotification {
+  source: ReqSource
   related_request_id: string | null
   related_batch_id: string | null
+}
+
+const TABLE_BY_SOURCE: Record<ReqSource, string> = {
+  pharmacy: 'pharmacy_requests',
+  laboratory: 'laboratory_requests',
+  barangay: 'barangay_requests',
+}
+
+const SOURCE_STYLE: Record<ReqSource, { bg: string; color: string; label: string }> = {
+  pharmacy:   { bg: 'rgba(255,255,255,.18)', color: '#fff', label: 'Pharmacy'   },
+  laboratory: { bg: 'rgba(255,255,255,.18)', color: '#fff', label: 'Laboratory' },
+  barangay:   { bg: 'rgba(255,255,255,.18)', color: '#fff', label: 'Barangay'   },
 }
 
 const STATUS_STYLE: Record<ReqStatus, { bg: string; color: string; label: string }> = {
@@ -121,12 +143,16 @@ export default function RequestBatchModal({
   const [alertQty, setAlertQty] = useState(0)
   const [toast, setToast] = useState('')
 
-  useEffect(() => { loadData() }, [notification.related_batch_id, notification.related_request_id])
+  const source = notification.source
+  const table = TABLE_BY_SOURCE[source]
+  const isBarangaySource = source === 'barangay'
+
+  useEffect(() => { loadData() }, [notification.source, notification.related_batch_id, notification.related_request_id])
 
   async function loadData() {
     setLoading(true)
 
-    let query = supabase.from('pharmacy_requests').select('*')
+    let query = supabase.from(table).select('*')
     if (notification.related_batch_id) {
       query = query.eq('request_batch_id', notification.related_batch_id)
     } else if (notification.related_request_id) {
@@ -139,7 +165,8 @@ export default function RequestBatchModal({
 
     const { data: reqData, error: reqErr } = await query.order('medicine_name', { ascending: true })
     if (reqErr || !reqData) {
-      console.error('RequestBatchModal: fetch requests error', reqErr)
+      console.error(`RequestBatchModal: fetch requests error (${table})`, reqErr)
+      setRows([])
       setLoading(false)
       return
     }
@@ -156,6 +183,10 @@ export default function RequestBatchModal({
     // generic ingredient ("Paracetamol / Biogesic") are separate,
     // independently-stocked products — a plain "Paracetamol" request must
     // not silently pull in Biogesic-branded stock, and vice versa.
+    //
+    // Warehouse stock is shared across all three request sources — the
+    // same medicine_batches table is checked regardless of whether this
+    // is a Pharmacy, Laboratory, or Barangay request.
     const { data: batchData } = await supabase
       .from('medicine_batches')
       .select('boxes, strips_per_box, pieces_per_strip, loose_pieces, total_quantity, status, medicines(generic_name, brand_name)')
@@ -211,11 +242,11 @@ export default function RequestBatchModal({
 
   async function updateRow(id: string, patch: Partial<RequestRow>) {
     setBusyId(id)
-    const { error } = await supabase.from('pharmacy_requests').update(patch).eq('id', id)
+    const { error } = await supabase.from(table).update(patch).eq('id', id)
     if (!error) {
       setRows(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r))
     } else {
-      console.error('RequestBatchModal: update error', error)
+      console.error(`RequestBatchModal: update error (${table})`, error)
       showToast('✗ Failed to update.')
     }
     setBusyId(null)
@@ -223,6 +254,26 @@ export default function RequestBatchModal({
 
   const confirmRow = (id: string) => updateRow(id, { status: 'confirm' })
   const rejectRow  = (id: string) => updateRow(id, { status: 'rejected' })
+
+  // "Mark as Received" — set by WAREHOUSE staff themselves, right when
+  // they physically hand the items to Pharmacy/Laboratory/Barangay.
+  // Barangay and Laboratory don't have their own inventory module to
+  // mark a request "received" from their side, so this button is the
+  // single, consistent trigger point across all three sources.
+  //
+  // Setting status to 'received' fires the DB trigger
+  // (trg_deduct_stock_fefo → fn_deduct_stock_fefo()) on all three
+  // request tables, which deducts from medicine_batches FEFO (soonest
+  // expiration first). That happens server-side the instant the update
+  // lands — so right after it, we do a full loadData() (not just a
+  // local status patch) to pull the post-deduction stock numbers and
+  // reflect them immediately in the "Warehouse Stock" column instead of
+  // showing stale pre-deduction figures until the modal is reopened.
+  async function markReceived(row: EnrichedRow) {
+    await updateRow(row.id, { status: 'received' })
+    await loadData()
+    showToast(`✓ Na-receive na ang ${row.medicine_name}.`)
+  }
 
   function openAlert(row: EnrichedRow) {
     setAlertingId(row.id)
@@ -234,12 +285,13 @@ export default function RequestBatchModal({
     setAlertingId(null)
     showToast(
       alertQty <= 0
-        ? `⚠ Na-alert si pharmacy: walang stock ng ${row.medicine_name}.`
-        : `⚠ Na-alert si pharmacy: ${alertQty}/${row.requested_qty} ${row.unit} na lang ang ${row.medicine_name}.`
+        ? `⚠ Na-alert si ${SOURCE_STYLE[source].label}: walang stock ng ${row.medicine_name}.`
+        : `⚠ Na-alert si ${SOURCE_STYLE[source].label}: ${alertQty}/${row.requested_qty} ${row.unit} na lang ang ${row.medicine_name}.`
     )
   }
 
   const requester = rows[0]?.requested_by ?? ''
+  const requesterBarangay = rows[0]?.barangay ?? null
   const requestedAt = rows[0]?.requested_at
   const totalQty = rows.reduce((sum, r) => sum + r.requested_qty, 0)
   const overallStatus: ReqStatus | null = rows.length ? rollupStatus(rows.map(r => r.status)) : null
@@ -273,10 +325,18 @@ export default function RequestBatchModal({
           display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
         }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 800 }}>Request Details</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontSize: 16, fontWeight: 800 }}>Request Details</div>
+              <span style={{
+                background: SOURCE_STYLE[source].bg, color: SOURCE_STYLE[source].color,
+                fontSize: 10.5, fontWeight: 800, padding: '3px 9px', borderRadius: 20,
+                letterSpacing: '.02em',
+              }}>{SOURCE_STYLE[source].label}</span>
+            </div>
             {!loading && rows.length > 0 && (
               <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 4 }}>
                 {formatPHT(requestedAt!)} · {requester}
+                {isBarangaySource && requesterBarangay ? ` · Brgy. ${requesterBarangay}` : ''}
               </div>
             )}
           </div>
@@ -342,7 +402,7 @@ export default function RequestBatchModal({
                           <tr key={row.id} style={{ borderBottom: alertingId === row.id ? 'none' : '1px solid #eef4f0' }}>
                             <td style={{ padding: '12px 16px', color: '#6b8a75' }}>{idx + 1}</td>
                             <td style={{ padding: '12px 16px', fontWeight: 700 }}>{row.medicine_name}</td>
-                            <td style={{ padding: '12px 16px', color: '#6b8a75' }}>—</td>
+                            <td style={{ padding: '12px 16px', color: '#6b8a75' }}>{row.brand_name || '—'}</td>
                             <td style={{ padding: '12px 16px' }}>{row.dosage ?? '—'}</td>
                             <td style={{ padding: '12px 16px' }}>{row.dosage_form ?? '—'}</td>
                             <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>{row.requested_qty} {row.unit}</td>
@@ -382,6 +442,13 @@ export default function RequestBatchModal({
                                     style={{ background: '#fee2e2', color: '#dc2626', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
                                   >Reject</button>
                                 </div>
+                              )}
+                              {row.status === 'confirm' && (
+                                <button
+                                  disabled={isBusy}
+                                  onClick={() => markReceived(row)}
+                                  style={{ background: '#dcf3e3', color: '#1f7a44', border: 'none', fontSize: 10, fontWeight: 700, padding: '5px 10px', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                                >Mark as Received</button>
                               )}
                             </td>
                           </tr>
@@ -439,7 +506,10 @@ export default function RequestBatchModal({
       </div>
 
       {toast && (
-        <div className={styles.toast} style={{ background: toast.startsWith('⚠') ? '#ca8a04' : '#dc2626' }}>
+        <div
+          className={styles.toast}
+          style={{ background: toast.startsWith('⚠') ? '#ca8a04' : toast.startsWith('✓') ? '#1f7a44' : '#dc2626' }}
+        >
           {toast}
         </div>
       )}
