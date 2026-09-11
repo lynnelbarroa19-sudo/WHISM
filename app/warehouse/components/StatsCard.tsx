@@ -13,6 +13,18 @@ interface ExpiringSoon {
 
 type Source = 'LGU' | 'PhilHealth' | 'DOH'
 
+// Preset buckets stay the same three options as before (30/60/90 days),
+// now joined by a fourth "Custom" option that reveals a From/To date
+// range instead of a fixed bucket.
+type FilterKey = '30' | '60' | '90' | 'custom'
+
+const PRESET_OPTIONS: { key: FilterKey; label: string }[] = [
+  { key: '30', label: 'Next 30 days' },
+  { key: '60', label: 'Next 31–60 days' },
+  { key: '90', label: 'Next 61–90 days' },
+  { key: 'custom', label: 'Search specific date...' },
+]
+
 // ── Custom watermark-style icons for the analytics cards ──
 function BoxIcon({ size = 64 }: { size?: number }) {
   return (
@@ -81,15 +93,31 @@ export default function StatsCards() {
   const [totalMedicine, setTotalMedicine] = useState(0)
   const [sourceCounts, setSourceCounts] = useState<Record<Source, number>>({ LGU: 0, PhilHealth: 0, DOH: 0 })
   const [expiringSoon, setExpiringSoon] = useState<ExpiringSoon[]>([])
-  const [dayFilter, setDayFilter] = useState<30 | 60 | 90>(30)
+  const [filterKey, setFilterKey] = useState<FilterKey>('30')
+  // Custom filter — a single cutoff date (yyyy-mm-dd, as produced by
+  // <input type="date">). Shows everything expiring from today through
+  // this date, e.g. picking 9/20/2026 shows all meds expiring by then.
+  const [customDate, setCustomDate] = useState('')
   const [loading, setLoading] = useState(true)
   const [expiringLoading, setExpiringLoading] = useState(true)
   const [expiringError, setExpiringError] = useState('')
   const today = new Date()
 
   useEffect(() => { fetchStats() }, [])
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { fetchExpiring(dayFilter) }, [dayFilter])
+
+  // Presets fetch immediately on selection. Custom only fetches once a
+  // cutoff date is picked — from today through that date.
+  useEffect(() => {
+    if (filterKey === 'custom') {
+      if (customDate) {
+        fetchExpiringRange(toISODate(new Date()), customDate)
+      }
+      return
+    }
+    const { start, end } = presetRange(filterKey)
+    fetchExpiringRange(toISODate(start), toISODate(end))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey, customDate])
 
   // Counts distinct medicines (catalog entries) that currently have at
   // least one non-archived batch sourced from `source`. This lives on
@@ -130,37 +158,48 @@ export default function StatsCards() {
     setLoading(false)
   }
 
+  const toISODate = (d: Date) => d.toISOString().split('T')[0]
+
+  // Same non-overlapping buckets as before (30d = today..+30,
+  // 60d = +31..+60, 90d = +61..+90), just factored out so both the
+  // preset and custom paths can share one fetch function.
+  const presetRange = (days: '30' | '60' | '90'): { start: Date; end: Date } => {
+    const start = new Date()
+    const end = new Date()
+    if (days === '30') {
+      end.setDate(end.getDate() + 30)
+    } else if (days === '60') {
+      start.setDate(start.getDate() + 31)
+      end.setDate(end.getDate() + 60)
+    } else {
+      start.setDate(start.getDate() + 61)
+      end.setDate(end.getDate() + 90)
+    }
+    return { start, end }
+  }
+
   // FIXED: expiration_date and total_quantity live on medicine_batches, not on
   // medicines (medicines is just the catalog — generic_name, dosage, category,
   // unit). This joins medicine_batches -> medicines to pull the generic_name,
   // and only counts batches that are actually still active/in-stock.
-  const fetchExpiring = async (days: number) => {
+  //
+  // Takes a plain ISO (yyyy-mm-dd) start/end so both presets and the
+  // custom date-range picker can call the exact same fetch.
+  const fetchExpiringRange = async (startISO: string, endISO: string) => {
     setExpiringLoading(true)
     setExpiringError('')
-
-    const startDate = new Date()
-    const endDate = new Date()
-    if (days === 30) {
-      endDate.setDate(endDate.getDate() + 30)
-    } else if (days === 60) {
-      startDate.setDate(startDate.getDate() + 31)
-      endDate.setDate(endDate.getDate() + 60)
-    } else {
-      startDate.setDate(startDate.getDate() + 61)
-      endDate.setDate(endDate.getDate() + 90)
-    }
 
     const { data, error } = await supabase
       .from('medicine_batches')
       .select('batch_id, medicine_id, batch_number, expiration_date, total_quantity, medicines!inner(generic_name)')
       .in('status', ['available', 'low_stock'])
       .gt('total_quantity', 0)
-      .gte('expiration_date', startDate.toISOString().split('T')[0])
-      .lte('expiration_date', endDate.toISOString().split('T')[0])
+      .gte('expiration_date', startISO)
+      .lte('expiration_date', endISO)
       .order('expiration_date', { ascending: true })
 
     if (error) {
-      console.error('fetchExpiring error:', error)
+      console.error('fetchExpiringRange error:', error)
       setExpiringError('Could not load expiring medicines. Check your connection and try again.')
       setExpiringSoon([])
       setExpiringLoading(false)
@@ -191,6 +230,14 @@ export default function StatsCards() {
   }
 
   const dateLabel = today.toLocaleDateString('en-PH', { weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit' })
+
+  const emptyText = () => {
+    if (filterKey === '30') return 'No medicines expiring within 30 days'
+    if (filterKey === '60') return 'No medicines expiring between 31–60 days'
+    if (filterKey === '90') return 'No medicines expiring between 61–90 days'
+    if (customDate) return `No medicines expiring on or before ${customDate}`
+    return 'Pumili ng date sa gilid'
+  }
 
   return (
     <>
@@ -256,17 +303,39 @@ export default function StatsCards() {
           )}
         </div>
         <div className={styles.cardBody} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 14 }}>
-            {([30, 60, 90] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setDayFilter(d)}
-                className={styles.filterBtn}
-                style={dayFilter === d ? { background: 'var(--green)', color: '#fff', borderColor: 'var(--green)' } : undefined}
-              >
-                {d}d
-              </button>
-            ))}
+
+          {/* Filter row — dropdown on the left (sized to its own text,
+              not stretched), date input pinned to the right corner when
+              "Custom" is picked. */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center', justifyContent: filterKey === 'custom' ? 'space-between' : 'flex-start' }}>
+            <select
+              value={filterKey}
+              onChange={(e) => setFilterKey(e.target.value as FilterKey)}
+              style={{
+                flex: filterKey === 'custom' ? '0 1 auto' : '1 1 100%',
+                minWidth: 0, boxSizing: 'border-box', padding: '8px 12px',
+                borderRadius: 8, border: '1.5px solid var(--border, #cfe4d6)',
+                fontSize: 12.5, fontWeight: 700, color: 'inherit',
+                background: 'var(--surface, #fff)', fontFamily: 'inherit', cursor: 'pointer',
+              }}
+            >
+              {PRESET_OPTIONS.map((opt) => (
+                <option key={opt.key} value={opt.key}>{opt.label}</option>
+              ))}
+            </select>
+
+            {filterKey === 'custom' && (
+              <input
+                type="date"
+                value={customDate}
+                onChange={(e) => setCustomDate(e.target.value)}
+                style={{
+                  flex: '0 0 auto', width: 118, boxSizing: 'border-box', padding: '8px 6px',
+                  borderRadius: 8, border: '1.5px solid var(--border, #cfe4d6)',
+                  fontSize: 12, fontFamily: 'inherit', color: 'inherit', background: 'var(--surface, #fff)',
+                }}
+              />
+            )}
           </div>
 
           {expiringLoading ? (
@@ -275,7 +344,14 @@ export default function StatsCards() {
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: '20px 0', textAlign: 'center' }}>
               <span style={{ fontSize: 12, color: '#dc2626' }}>⚠ {expiringError}</span>
               <button
-                onClick={() => fetchExpiring(dayFilter)}
+                onClick={() => {
+                  if (filterKey === 'custom') {
+                    if (customDate) fetchExpiringRange(toISODate(new Date()), customDate)
+                  } else {
+                    const { start, end } = presetRange(filterKey)
+                    fetchExpiringRange(toISODate(start), toISODate(end))
+                  }
+                }}
                 style={{ background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6, padding: '4px 12px', fontSize: 11, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
               >
                 Retry
@@ -304,13 +380,7 @@ export default function StatsCards() {
               })}
             </div>
           ) : (
-            <div className={styles.emptyText}>
-              {dayFilter === 30
-                ? 'No medicines expiring within 30 days'
-                : dayFilter === 60
-                ? 'No medicines expiring between 31–60 days'
-                : 'No medicines expiring between 61–90 days'}
-            </div>
+            <div className={styles.emptyText}>{emptyText()}</div>
           )}
         </div>
       </div>
